@@ -1,6 +1,6 @@
 """
-predictor.py — ML prediction engine using Gradient Boosting.
-Features: technical indicators + news sentiment.
+predictor.py — Multi-model ensemble prediction engine.
+Uses Gradient Boosting + Random Forest + XGBoost for robust predictions.
 Self-improves by retraining with accuracy feedback.
 """
 
@@ -8,9 +8,10 @@ import pickle
 import numpy as np
 import pandas as pd
 import ta
-from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.preprocessing import StandardScaler
+from xgboost import XGBClassifier
 from pathlib import Path
 from datetime import datetime
 
@@ -20,6 +21,27 @@ from sentiment import get_ticker_sentiment
 
 MODELS_DIR = Path(__file__).parent / "data" / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ── Ensemble model definitions ───────────────────────────────────────────────
+
+def _get_models():
+    """Return dict of named models for the ensemble."""
+    return {
+        "GradientBoosting": GradientBoostingClassifier(
+            n_estimators=100, max_depth=4, learning_rate=0.1,
+            subsample=0.8, random_state=42,
+        ),
+        "RandomForest": RandomForestClassifier(
+            n_estimators=150, max_depth=6, min_samples_leaf=5,
+            random_state=42, n_jobs=-1,
+        ),
+        "XGBoost": XGBClassifier(
+            n_estimators=100, max_depth=4, learning_rate=0.1,
+            subsample=0.8, colsample_bytree=0.8,
+            random_state=42, eval_metric="logloss",
+            verbosity=0,
+        ),
+    }
 
 
 # ── Feature engineering ──────────────────────────────────────────────────────
@@ -192,7 +214,7 @@ def prepare_dataset(ticker: str, horizon: str = "next_day"):
 # ── Model training ───────────────────────────────────────────────────────────
 
 def train_model(ticker: str, horizon: str = "next_day") -> dict:
-    """Train a GradientBoosting model for the given ticker and horizon."""
+    """Train a 3-model ensemble for the given ticker and horizon."""
     X, y, combined = prepare_dataset(ticker, horizon)
 
     if X is None:
@@ -202,54 +224,73 @@ def train_model(ticker: str, horizon: str = "next_day") -> dict:
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    # Time-series cross-validation
-    model = GradientBoostingClassifier(
-        n_estimators=100,
-        max_depth=4,
-        learning_rate=0.1,
-        subsample=0.8,
-        random_state=42,
-    )
-
+    models = _get_models()
+    trained = {}
+    cv_results = {}
     tscv = TimeSeriesSplit(n_splits=5)
-    cv_scores = cross_val_score(model, X_scaled, y, cv=tscv, scoring="accuracy")
 
-    # Train on full data
-    model.fit(X_scaled, y)
+    for name, model in models.items():
+        try:
+            cv_scores = cross_val_score(model, X_scaled, y, cv=tscv, scoring="accuracy")
+            model.fit(X_scaled, y)
+            trained[name] = model
+            cv_results[name] = {
+                "accuracy": round(cv_scores.mean() * 100, 1),
+                "std": round(cv_scores.std() * 100, 1),
+            }
+        except Exception as e:
+            cv_results[name] = {"accuracy": 0, "std": 0, "error": str(e)}
 
-    # Save model + scaler
+    if not trained:
+        return {"error": "All models failed to train"}
+
+    # Save ensemble bundle
     model_path = MODELS_DIR / f"{ticker}_{horizon}.pkl"
     with open(model_path, "wb") as f:
-        pickle.dump({"model": model, "scaler": scaler, "features": list(X.columns)}, f)
+        pickle.dump({
+            "models": trained,
+            "scaler": scaler,
+            "features": list(X.columns),
+            "cv_results": cv_results,
+        }, f)
 
-    # Log model metadata
-    avg_accuracy = round(cv_scores.mean() * 100, 1)
-    db.save_model_meta(ticker, horizon, len(X), avg_accuracy, list(X.columns))
+    # Overall ensemble accuracy = weighted average of individual CV scores
+    valid_accs = [v["accuracy"] for v in cv_results.values() if v["accuracy"] > 0]
+    ensemble_accuracy = round(sum(valid_accs) / len(valid_accs), 1) if valid_accs else 0
+
+    db.save_model_meta(ticker, horizon, len(X), ensemble_accuracy, list(X.columns))
 
     return {
         "ticker": ticker,
         "horizon": horizon,
-        "cv_accuracy": avg_accuracy,
-        "cv_std": round(cv_scores.std() * 100, 1),
+        "ensemble_accuracy": ensemble_accuracy,
+        "model_results": cv_results,
         "sample_size": len(X),
+        "num_models": len(trained),
         "features": list(X.columns),
     }
 
 
 def load_model(ticker: str, horizon: str = "next_day"):
-    """Load a trained model from disk."""
+    """Load a trained ensemble from disk."""
     model_path = MODELS_DIR / f"{ticker}_{horizon}.pkl"
     if not model_path.exists():
         return None
     with open(model_path, "rb") as f:
-        return pickle.load(f)
+        bundle = pickle.load(f)
+    # Handle legacy single-model bundles
+    if "model" in bundle and "models" not in bundle:
+        bundle["models"] = {"GradientBoosting": bundle.pop("model")}
+        bundle["cv_results"] = {"GradientBoosting": {"accuracy": 0, "std": 0}}
+    return bundle
 
 
 # ── Prediction ───────────────────────────────────────────────────────────────
 
 def predict(ticker: str, horizon: str = "next_day") -> dict:
     """
-    Make a prediction for the given ticker.
+    Make an ensemble prediction for the given ticker.
+    Each model votes, and the final prediction is the weighted consensus.
     Auto-trains if no model exists.
     """
     bundle = load_model(ticker, horizon)
@@ -261,9 +302,10 @@ def predict(ticker: str, horizon: str = "next_day") -> dict:
             return result
         bundle = load_model(ticker, horizon)
 
-    model = bundle["model"]
+    models = bundle["models"]
     scaler = bundle["scaler"]
     feature_names = bundle["features"]
+    cv_results = bundle.get("cv_results", {})
 
     # Build current features
     df = fetch_stock_data(ticker, period="6mo")
@@ -293,6 +335,7 @@ def predict(ticker: str, horizon: str = "next_day") -> dict:
         sentiment_score = sent["avg_sentiment"]
     except Exception:
         sentiment_score = 0.0
+        sent = {}
 
     features = build_features(df, sentiment_score)
     features = features.fillna(0)
@@ -300,16 +343,61 @@ def predict(ticker: str, horizon: str = "next_day") -> dict:
     if features.empty:
         return {"error": "Could not compute features"}
 
-    # Use the latest row
-    latest = features.iloc[[-1]][feature_names]
+    # Use the latest row — only use features the model was trained on
+    available = [f for f in feature_names if f in features.columns]
+    latest = features.iloc[[-1]][available]
+
+    # Pad missing columns with 0
+    for f in feature_names:
+        if f not in latest.columns:
+            latest[f] = 0
+    latest = latest[feature_names]
+
     X_scaled = scaler.transform(latest)
 
-    # Predict
-    pred_class = model.predict(X_scaled)[0]
-    pred_proba = model.predict_proba(X_scaled)[0]
+    # ── Ensemble voting ──────────────────────────────────────────────────
+    votes = []
+    model_details = []
 
-    direction = "up" if pred_class == 1 else "down"
-    confidence = float(max(pred_proba))
+    for name, model in models.items():
+        try:
+            pred_class = model.predict(X_scaled)[0]
+            pred_proba = model.predict_proba(X_scaled)[0]
+            direction = "up" if pred_class == 1 else "down"
+            confidence = float(max(pred_proba))
+
+            # Weight by CV accuracy (better models get more say)
+            cv_acc = cv_results.get(name, {}).get("accuracy", 50) / 100
+            weight = max(cv_acc, 0.5)  # Floor at 0.5
+
+            votes.append({
+                "name": name,
+                "direction": direction,
+                "confidence": confidence,
+                "weight": weight,
+                "cv_accuracy": cv_results.get(name, {}).get("accuracy", 0),
+            })
+            model_details.append(f"{name}: {direction} ({confidence*100:.0f}%)")
+        except Exception:
+            continue
+
+    if not votes:
+        return {"error": "All models failed to predict"}
+
+    # Weighted ensemble: sum weighted probabilities for "up"
+    total_weight = sum(v["weight"] for v in votes)
+    up_score = sum(
+        v["weight"] * (v["confidence"] if v["direction"] == "up" else 1 - v["confidence"])
+        for v in votes
+    ) / total_weight
+
+    direction = "up" if up_score > 0.5 else "down"
+    confidence = up_score if direction == "up" else 1 - up_score
+
+    # Consensus info
+    up_votes = sum(1 for v in votes if v["direction"] == "up")
+    down_votes = len(votes) - up_votes
+    consensus = f"{max(up_votes, down_votes)}/{len(votes)} agree"
 
     # Get model accuracy info
     meta = db.get_latest_model_meta(ticker, horizon)
@@ -327,6 +415,9 @@ def predict(ticker: str, horizon: str = "next_day") -> dict:
         "horizon": horizon,
         "direction": direction,
         "confidence": round(confidence * 100, 1),
+        "consensus": consensus,
+        "model_votes": votes,
+        "model_details": model_details,
         "sentiment": sentiment_score,
         "sentiment_label": sent.get("label", "N/A") if sentiment_score != 0 else "N/A",
         "model_cv_accuracy": model_accuracy,

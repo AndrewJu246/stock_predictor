@@ -5,12 +5,13 @@ Simulates how the model would have performed historically.
 
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
+from xgboost import XGBClassifier
 from datetime import datetime
 
 from data_fetcher import fetch_stock_data, fetch_market_data
-from predictor import build_features
+from predictor import build_features, _get_models
 
 
 def run_backtest(ticker: str, horizon: str = "next_day",
@@ -92,17 +93,37 @@ def run_backtest(ticker: str, horizon: str = "next_day",
             X_train_scaled = scaler.fit_transform(X_train)
             X_test_scaled = scaler.transform(X_test)
 
-            model = GradientBoostingClassifier(
-                n_estimators=80,
-                max_depth=3,
-                learning_rate=0.1,
-                subsample=0.8,
-                random_state=42,
-            )
-            model.fit(X_train_scaled, y_train)
+            # Train all ensemble models and vote
+            ensemble_models = _get_models()
+            votes_up = 0
+            votes_total = 0
+            weighted_up_score = 0
+            total_weight = 0
 
-            pred = model.predict(X_test_scaled)[0]
-            pred_proba = max(model.predict_proba(X_test_scaled)[0])
+            for name, mdl in ensemble_models.items():
+                try:
+                    mdl.fit(X_train_scaled, y_train)
+                    p_class = mdl.predict(X_test_scaled)[0]
+                    p_proba = mdl.predict_proba(X_test_scaled)[0]
+                    conf = float(max(p_proba))
+                    direction_up = p_class == 1
+
+                    up_prob = conf if direction_up else 1 - conf
+                    weighted_up_score += up_prob
+                    total_weight += 1
+                    votes_total += 1
+                    if direction_up:
+                        votes_up += 1
+                except Exception:
+                    continue
+
+            if votes_total == 0:
+                continue
+
+            ensemble_up_score = weighted_up_score / total_weight
+            pred = 1 if ensemble_up_score > 0.5 else 0
+            pred_proba = ensemble_up_score if pred == 1 else 1 - ensemble_up_score
+
             actual = int(test_row["target"].iloc[0])
             actual_pct = float(test_row["pct_change"].iloc[0])
             close_price = float(test_row["close"].iloc[0])
@@ -115,6 +136,7 @@ def run_backtest(ticker: str, horizon: str = "next_day",
                 "actual_pct": round(actual_pct, 2),
                 "close": round(close_price, 2),
                 "correct": pred == actual,
+                "consensus": f"{max(votes_up, votes_total - votes_up)}/{votes_total}",
             })
         except Exception:
             continue

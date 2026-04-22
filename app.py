@@ -139,6 +139,7 @@ with tab_overview:
             "Signal": p["signal"],
             "Direction": p["direction"].upper(),
             "Confidence": f"{p['confidence']}%",
+            "Consensus": p.get("consensus", "—"),
             "Sentiment": p.get("sentiment_label", "N/A"),
             "Model Acc.": f"{p['model_cv_accuracy']}%" if p.get("model_cv_accuracy") else "—",
             "Track Acc.": f"{p['tracked_accuracy']}% ({p['tracked_total']})" if p.get("tracked_total", 0) > 0 else "No data yet",
@@ -213,7 +214,16 @@ with tab_detail:
                     if "error" not in p:
                         direction_icon = "🟢" if p["direction"] == "up" else "🔴"
                         st.markdown(f"**{label}:** {direction_icon} {p['signal']}")
-                        st.markdown(f"Confidence: {p['confidence']}%")
+                        st.markdown(f"Confidence: {p['confidence']}% · {p.get('consensus', '')}")
+
+                        # Show individual model votes
+                        if p.get("model_votes"):
+                            vote_strs = []
+                            for v in p["model_votes"]:
+                                icon = "↑" if v["direction"] == "up" else "↓"
+                                vote_strs.append(f"{v['name']}: {icon} {v['confidence']*100:.0f}%")
+                            st.caption(" · ".join(vote_strs))
+
                         if p.get("tracked_total", 0) > 0:
                             st.markdown(f"Track record: {p['tracked_accuracy']}% "
                                         f"({p['tracked_total']} predictions)")
