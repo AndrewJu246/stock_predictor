@@ -4,7 +4,6 @@ db.py — SQLite storage for predictions, accuracy tracking, and model metadata.
 
 import sqlite3
 import json
-import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -305,7 +304,18 @@ def delete_position(position_id):
 
 
 def save_portfolio_snapshot(total_value, total_cost, total_pnl, pnl_pct):
+    """Save snapshot, but only if the last one is >1 hour old."""
     conn = get_conn()
+    # Check if we already have a recent snapshot
+    cutoff = (datetime.utcnow() - timedelta(hours=1)).isoformat()
+    recent = conn.execute(
+        "SELECT COUNT(*) as cnt FROM portfolio_snapshots WHERE snapshot_at >= ?",
+        (cutoff,)
+    ).fetchone()
+    if recent and recent["cnt"] > 0:
+        conn.close()
+        return  # Skip — too recent
+
     conn.execute(
         """INSERT INTO portfolio_snapshots (snapshot_at, total_value, total_cost,
            total_pnl, pnl_pct) VALUES (?, ?, ?, ?, ?)""",

@@ -5,11 +5,29 @@ data_fetcher.py — Pulls stock price data via yfinance and news via RSS feeds.
 import yfinance as yf
 import feedparser
 import pandas as pd
+import numpy as np
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
+
+# Simple time-based cache for expensive API calls
+_cache = {}
+_CACHE_TTL = 300  # 5 minutes
+
+
+def _get_cached(key):
+    """Return cached value if it exists and is fresh, else None."""
+    if key in _cache:
+        val, ts = _cache[key]
+        if (datetime.now() - ts).total_seconds() < _CACHE_TTL:
+            return val
+    return None
+
+
+def _set_cached(key, val):
+    _cache[key] = (val, datetime.now())
 
 
 def load_config():
@@ -32,10 +50,10 @@ def add_ticker(ticker: str):
     cfg = load_config()
     t = ticker.upper().strip()
     if t not in cfg["watchlist"]:
-        # Validate ticker exists
-        info = yf.Ticker(t).info
-        if not info or info.get("regularMarketPrice") is None:
-            raise ValueError(f"Ticker '{t}' not found")
+        # Validate ticker exists by fetching recent history
+        hist = yf.Ticker(t).history(period="5d")
+        if hist.empty:
+            raise ValueError(f"Ticker '{t}' not found or has no data")
         cfg["watchlist"].append(t)
         save_config(cfg)
     return cfg["watchlist"]
@@ -66,14 +84,18 @@ def fetch_stock_data(ticker: str, period: str = "6mo") -> pd.DataFrame:
     # Basic derived columns
     df["Return"] = df["Close"].pct_change()
     df["Return_5d"] = df["Close"].pct_change(5)
-    import numpy as np
     df["Log_Volume"] = df["Volume"].apply(lambda v: np.log1p(v) if v > 0 else 0)
 
     return df
 
 
 def fetch_current_price(ticker: str) -> dict:
-    """Get the current / latest price info for a ticker."""
+    """Get the current / latest price info for a ticker (cached 5 min)."""
+    cache_key = f"price_{ticker}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     tk = yf.Ticker(ticker)
     info = tk.info
     hist = tk.history(period="5d")
@@ -87,7 +109,7 @@ def fetch_current_price(ticker: str) -> dict:
     change = latest["Close"] - prev["Close"]
     change_pct = (change / prev["Close"]) * 100 if prev["Close"] else 0
 
-    return {
+    result = {
         "ticker": ticker,
         "price": round(latest["Close"], 2),
         "change": round(change, 2),
@@ -99,6 +121,8 @@ def fetch_current_price(ticker: str) -> dict:
         "market_cap": info.get("marketCap"),
         "updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
     }
+    _set_cached(cache_key, result)
+    return result
 
 
 def fetch_batch_prices(tickers: list) -> list:
@@ -166,8 +190,13 @@ SECTOR_ETFS = {
 def fetch_market_data(period: str = "6mo") -> pd.DataFrame:
     """
     Fetch market-wide indicators: S&P 500, VIX, Treasury yields.
-    Returns a DataFrame indexed by date with market features.
+    Cached for 5 minutes to avoid redundant API calls.
     """
+    cache_key = f"market_{period}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     market = pd.DataFrame()
 
     indicators = {
@@ -189,6 +218,7 @@ def fetch_market_data(period: str = "6mo") -> pd.DataFrame:
         except Exception:
             continue
 
+    _set_cached(cache_key, market)
     return market
 
 

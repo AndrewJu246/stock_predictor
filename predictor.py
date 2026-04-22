@@ -17,10 +17,10 @@ try:
 except ImportError:
     HAS_XGBOOST = False
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import db
-from data_fetcher import fetch_stock_data, fetch_market_data, fetch_sector_data, fetch_earnings_proximity
+from data_fetcher import fetch_stock_data, fetch_market_data, fetch_sector_data
 from sentiment import get_ticker_sentiment
 
 MODELS_DIR = Path(__file__).parent / "data" / "models"
@@ -473,11 +473,10 @@ def resolve_predictions():
         created = datetime.fromisoformat(pred["created_at"])
 
         # Determine when the prediction should have resolved
-        from datetime import timedelta as td
         if horizon == "next_day":
-            check_after = created + td(days=1)
+            check_after = created + timedelta(days=1)
         else:  # weekly
-            check_after = created + td(days=5)
+            check_after = created + timedelta(days=5)
 
         if datetime.utcnow() < check_after:
             continue  # Not enough time has passed
@@ -490,7 +489,6 @@ def resolve_predictions():
 
             # Find the price at creation and after the horizon
             created_date = created.date()
-            df_dates = df.index.date
 
             # Find closest dates
             before_prices = df[df.index.date <= created_date]
