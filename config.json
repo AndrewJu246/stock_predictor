@@ -1,0 +1,24 @@
+{
+  "watchlist": [
+    "AAPL",
+    "MSFT",
+    "GOOGL",
+    "AMZN",
+    "TSLA",
+    "LITE"
+  ],
+  "settings": {
+    "lookback_days": 180,
+    "retrain_interval_hours": 24,
+    "news_sources": [
+      "https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US",
+      "https://news.google.com/rss/search?q={ticker}+stock&hl=en-US&gl=US&ceid=US:en"
+    ],
+    "prediction_thresholds": {
+      "strong_buy": 0.7,
+      "buy": 0.55,
+      "hold_low": 0.45,
+      "sell": 0.3
+    }
+  }
+}
