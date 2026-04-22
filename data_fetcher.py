@@ -59,6 +59,10 @@ def fetch_stock_data(ticker: str, period: str = "6mo") -> pd.DataFrame:
     if df.empty:
         return df
 
+    # Normalize timezone — strip tz so joins work cleanly
+    if df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
+
     # Basic derived columns
     df["Return"] = df["Close"].pct_change()
     df["Return_5d"] = df["Close"].pct_change(5)
@@ -139,3 +143,119 @@ def fetch_news(ticker: str, max_articles: int = 20) -> list:
             unique.append(a)
 
     return unique[:max_articles]
+
+
+# ── Market-wide data sources ────────────────────────────────────────────────
+
+# Sector ETF mapping
+SECTOR_ETFS = {
+    "Technology": "XLK",
+    "Healthcare": "XLV",
+    "Financial Services": "XLF",
+    "Consumer Cyclical": "XLY",
+    "Consumer Defensive": "XLP",
+    "Energy": "XLE",
+    "Industrials": "XLI",
+    "Materials": "XLB",
+    "Real Estate": "XLRE",
+    "Utilities": "XLU",
+    "Communication Services": "XLC",
+}
+
+
+def fetch_market_data(period: str = "6mo") -> pd.DataFrame:
+    """
+    Fetch market-wide indicators: S&P 500, VIX, Treasury yields.
+    Returns a DataFrame indexed by date with market features.
+    """
+    market = pd.DataFrame()
+
+    indicators = {
+        "^GSPC": "sp500",      # S&P 500
+        "^VIX": "vix",         # Volatility Index
+        "^TNX": "treasury_10y", # 10-Year Treasury Yield
+    }
+
+    for symbol, name in indicators.items():
+        try:
+            tk = yf.Ticker(symbol)
+            hist = tk.history(period=period, auto_adjust=True)
+            if not hist.empty:
+                if hist.index.tz is not None:
+                    hist.index = hist.index.tz_localize(None)
+                market[f"{name}_close"] = hist["Close"]
+                market[f"{name}_return"] = hist["Close"].pct_change()
+                market[f"{name}_return_5d"] = hist["Close"].pct_change(5)
+        except Exception:
+            continue
+
+    return market
+
+
+def fetch_sector_data(ticker: str, period: str = "6mo") -> pd.DataFrame:
+    """
+    Fetch the sector ETF performance for a given ticker's sector.
+    """
+    try:
+        info = yf.Ticker(ticker).info
+        sector = info.get("sector", "")
+        etf_ticker = SECTOR_ETFS.get(sector)
+
+        if not etf_ticker:
+            return pd.DataFrame()
+
+        tk = yf.Ticker(etf_ticker)
+        hist = tk.history(period=period, auto_adjust=True)
+        if hist.empty:
+            return pd.DataFrame()
+
+        if hist.index.tz is not None:
+            hist.index = hist.index.tz_localize(None)
+
+        result = pd.DataFrame(index=hist.index)
+        result["sector_close"] = hist["Close"]
+        result["sector_return"] = hist["Close"].pct_change()
+        result["sector_return_5d"] = hist["Close"].pct_change(5)
+        result["sector_momentum"] = hist["Close"].pct_change(20)
+
+        return result
+    except Exception:
+        return pd.DataFrame()
+
+
+def get_ticker_sector(ticker: str) -> str:
+    """Get the sector for a ticker."""
+    try:
+        return yf.Ticker(ticker).info.get("sector", "Unknown")
+    except Exception:
+        return "Unknown"
+
+
+def fetch_earnings_proximity(ticker: str) -> dict:
+    """
+    Check how close the next earnings date is.
+    Earnings proximity affects volatility and price action.
+    """
+    try:
+        tk = yf.Ticker(ticker)
+        cal = tk.calendar
+        if cal is not None and not cal.empty:
+            # Calendar format varies — try to extract earnings date
+            if "Earnings Date" in cal.index:
+                dates = cal.loc["Earnings Date"]
+                if hasattr(dates, '__len__') and len(dates) > 0:
+                    next_earnings = pd.Timestamp(dates.iloc[0])
+                else:
+                    next_earnings = pd.Timestamp(dates)
+
+                days_until = (next_earnings - pd.Timestamp.now()).days
+                return {
+                    "next_earnings": next_earnings.strftime("%Y-%m-%d"),
+                    "days_until": max(0, days_until),
+                    "is_near": days_until <= 14,
+                }
+    except Exception:
+        pass
+
+    return {"next_earnings": None, "days_until": None, "is_near": False}
+

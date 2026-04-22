@@ -24,6 +24,7 @@ import db
 from data_fetcher import get_watchlist, add_ticker, remove_ticker, fetch_current_price, fetch_stock_data
 from sentiment import get_ticker_sentiment
 from predictor import predict, predict_all, resolve_predictions, train_model
+from backtester import run_backtest
 
 # Auto-resolve old predictions on every refresh cycle
 try:
@@ -45,7 +46,7 @@ st.sidebar.write(", ".join(watchlist) if watchlist else "No stocks added")
 col1, col2 = st.sidebar.columns(2)
 with col1:
     new_ticker = st.text_input("Add ticker", placeholder="e.g. NVDA")
-    if st.button("Add", use_container_width=True):
+    if st.button("Add", width="stretch"):
         if new_ticker:
             try:
                 updated = add_ticker(new_ticker)
@@ -56,7 +57,7 @@ with col1:
 
 with col2:
     remove_t = st.selectbox("Remove", [""] + watchlist)
-    if st.button("Remove", use_container_width=True):
+    if st.button("Remove", width="stretch"):
         if remove_t:
             remove_ticker(remove_t)
             st.success(f"Removed {remove_t}")
@@ -66,12 +67,12 @@ st.sidebar.markdown("---")
 
 # Actions
 st.sidebar.subheader("Actions")
-if st.sidebar.button("🔄 Resolve Past Predictions", use_container_width=True):
+if st.sidebar.button("🔄 Resolve Past Predictions", width="stretch"):
     with st.spinner("Checking predictions against actual data..."):
         count = resolve_predictions()
     st.sidebar.success(f"Resolved {count} predictions")
 
-if st.sidebar.button("🧠 Retrain All Models", use_container_width=True):
+if st.sidebar.button("🧠 Retrain All Models", width="stretch"):
     with st.spinner("Retraining models..."):
         for t in watchlist:
             for h in ["next_day", "weekly"]:
@@ -92,7 +93,7 @@ if not watchlist:
     st.stop()
 
 # Tabs
-tab_overview, tab_detail, tab_accuracy = st.tabs(["Overview", "Stock Detail", "Accuracy"])
+tab_overview, tab_detail, tab_accuracy, tab_backtest = st.tabs(["Overview", "Stock Detail", "Accuracy", "Backtest"])
 
 
 # ── TAB: Overview ────────────────────────────────────────────────────────────
@@ -160,7 +161,7 @@ with tab_overview:
         return ""
 
     styled = df_overview.style.map(color_signal, subset=["Signal"])
-    st.dataframe(styled, use_container_width=True, hide_index=True)
+    st.dataframe(styled, width="stretch", hide_index=True)
 
 
 # ── TAB: Stock Detail ───────────────────────────────────────────────────────
@@ -200,7 +201,7 @@ with tab_detail:
                     template="plotly_dark",
                     margin=dict(t=20, b=20),
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
         with col_pred:
             st.subheader("Predictions")
@@ -295,7 +296,7 @@ with tab_accuracy:
             template="plotly_dark",
             margin=dict(t=20, b=20),
         )
-        st.plotly_chart(fig_acc, use_container_width=True)
+        st.plotly_chart(fig_acc, width="stretch")
 
         # Recent predictions table
         with st.expander("Recent prediction history"):
@@ -306,7 +307,93 @@ with tab_accuracy:
             display_df.columns = ["Ticker", "Horizon", "Predicted", "Confidence",
                                   "Actual", "Actual %", "Correct", "Resolved"]
             display_df["Correct"] = display_df["Correct"].map({1: "✅", 0: "❌"})
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            st.dataframe(display_df, width="stretch", hide_index=True)
+
+
+# ── TAB: Backtest ────────────────────────────────────────────────────────────
+
+with tab_backtest:
+    st.subheader("Historical Backtesting")
+    st.caption("Walk-forward simulation: train on past data, predict the next day/week, "
+               "slide forward. Shows how the model would have performed historically.")
+
+    bt_col1, bt_col2 = st.columns(2)
+    with bt_col1:
+        bt_ticker = st.selectbox("Ticker", watchlist, key="bt_ticker")
+    with bt_col2:
+        bt_horizon = st.selectbox("Horizon", ["next_day", "weekly"], key="bt_horizon",
+                                   format_func=lambda x: "Next Day" if x == "next_day" else "Weekly")
+
+    if st.button("Run Backtest", width="content"):
+        with st.spinner(f"Backtesting {bt_ticker} ({bt_horizon})... this may take a minute."):
+            bt = run_backtest(bt_ticker, bt_horizon)
+
+        if "error" in bt:
+            st.error(bt["error"])
+        else:
+            # Summary metrics
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Accuracy", f"{bt['accuracy']}%")
+            m2.metric("Predictions", bt["total_predictions"])
+            m3.metric("Strategy Return", f"{bt['strategy_return']:+.1f}%")
+            m4.metric("Buy & Hold Return", f"{bt['buyhold_return']:+.1f}%")
+
+            st.caption(f"Period: {bt['date_range']}")
+
+            if bt.get("high_confidence_count", 0) > 0:
+                st.info(f"High-confidence predictions (≥60%): "
+                        f"{bt['high_confidence_accuracy']}% accurate "
+                        f"({bt['high_confidence_count']} predictions)")
+
+            # Equity curve chart
+            bt_df = pd.DataFrame(bt["results"])
+            bt_df["date"] = pd.to_datetime(bt_df["date"])
+
+            fig_eq = go.Figure()
+            fig_eq.add_trace(go.Scatter(
+                x=bt_df["date"], y=bt_df["strategy_equity"],
+                name="Model Strategy",
+                line=dict(color="#4CAF50", width=2),
+            ))
+            fig_eq.add_trace(go.Scatter(
+                x=bt_df["date"], y=bt_df["buyhold_equity"],
+                name="Buy & Hold",
+                line=dict(color="#FF9800", width=2, dash="dash"),
+            ))
+            fig_eq.add_hline(y=1.0, line_dash="dot", line_color="gray",
+                              annotation_text="Break Even")
+            fig_eq.update_layout(
+                title="Strategy vs Buy & Hold",
+                height=400, yaxis_title="Growth of $1",
+                template="plotly_dark", margin=dict(t=40, b=20),
+            )
+            st.plotly_chart(fig_eq, width="stretch")
+
+            # Rolling accuracy chart
+            if "rolling_accuracy" in bt_df.columns:
+                fig_ra = go.Figure()
+                fig_ra.add_trace(go.Scatter(
+                    x=bt_df["date"], y=bt_df["rolling_accuracy"],
+                    name="Rolling Accuracy",
+                    line=dict(color="#2196F3", width=2),
+                ))
+                fig_ra.add_hline(y=50, line_dash="dash", line_color="gray",
+                                  annotation_text="Random (50%)")
+                fig_ra.update_layout(
+                    title="Rolling Prediction Accuracy",
+                    height=300, yaxis_title="Accuracy %",
+                    template="plotly_dark", margin=dict(t=40, b=20),
+                )
+                st.plotly_chart(fig_ra, width="stretch")
+
+            # Prediction detail table
+            with st.expander("Full backtest results"):
+                show_df = bt_df[["date", "close", "predicted", "actual",
+                                  "confidence", "actual_pct", "correct"]].copy()
+                show_df.columns = ["Date", "Price", "Predicted", "Actual",
+                                    "Confidence %", "Actual Move %", "Correct"]
+                show_df["Correct"] = show_df["Correct"].map({True: "✅", False: "❌"})
+                st.dataframe(show_df, width="stretch", hide_index=True)
 
 
 # ── Footer ───────────────────────────────────────────────────────────────────
