@@ -7,7 +7,10 @@ import pandas as pd
 import numpy as np
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
-from xgboost import XGBClassifier
+try:
+    from xgboost import XGBClassifier
+except ImportError:
+    pass
 from datetime import datetime
 
 from data_fetcher import fetch_stock_data, fetch_market_data
@@ -15,9 +18,10 @@ from predictor import build_features, _get_models
 
 
 def run_backtest(ticker: str, horizon: str = "next_day",
-                 train_window: int = 90, test_step: int = 1) -> dict:
+                 train_window: int = 90, test_step: int = 3,
+                 progress_callback=None) -> dict:
     """
-    Walk-forward backtest.
+    Walk-forward backtest with ensemble voting.
     - Train on `train_window` days, predict the next day/week, slide forward.
     - Returns accuracy stats + equity curve.
     
@@ -76,8 +80,14 @@ def run_backtest(ticker: str, horizon: str = "next_day",
 
     start_idx = train_window
     end_idx = len(combined) - abs(shift)
+    total_steps = len(range(start_idx, end_idx, test_step))
+    step_count = 0
 
     for i in range(start_idx, end_idx, test_step):
+        step_count += 1
+        if progress_callback:
+            progress_callback(step_count / total_steps)
+
         train_data = combined.iloc[:i]
         test_row = combined.iloc[i:i+1]
 

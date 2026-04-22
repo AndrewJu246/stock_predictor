@@ -59,6 +59,29 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_pred_ticker ON predictions(ticker);
         CREATE INDEX IF NOT EXISTS idx_pred_unresolved ON predictions(ticker, resolved_at);
         CREATE INDEX IF NOT EXISTS idx_news_ticker ON news_cache(ticker, fetched_at);
+
+        CREATE TABLE IF NOT EXISTS portfolio (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker      TEXT NOT NULL,
+            shares      REAL NOT NULL,
+            buy_price   REAL NOT NULL,
+            buy_date    TEXT NOT NULL,
+            sell_price  REAL,
+            sell_date   TEXT,
+            status      TEXT NOT NULL DEFAULT 'open',  -- 'open' or 'closed'
+            notes       TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_at TEXT NOT NULL,
+            total_value REAL,
+            total_cost  REAL,
+            total_pnl   REAL,
+            pnl_pct     REAL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_portfolio_status ON portfolio(status);
     """)
     conn.commit()
     conn.close()
@@ -217,3 +240,87 @@ def has_recent_prediction(ticker, horizon, minutes=10):
     ).fetchone()
     conn.close()
     return row["cnt"] > 0
+
+
+# ── Portfolio ────────────────────────────────────────────────────────────────
+
+def add_position(ticker, shares, buy_price, buy_date=None, notes=""):
+    conn = get_conn()
+    if buy_date is None:
+        buy_date = datetime.utcnow().strftime("%Y-%m-%d")
+    conn.execute(
+        """INSERT INTO portfolio (ticker, shares, buy_price, buy_date, status, notes)
+           VALUES (?, ?, ?, ?, 'open', ?)""",
+        (ticker.upper(), shares, buy_price, buy_date, notes)
+    )
+    conn.commit()
+    conn.close()
+
+
+def close_position(position_id, sell_price, sell_date=None):
+    conn = get_conn()
+    if sell_date is None:
+        sell_date = datetime.utcnow().strftime("%Y-%m-%d")
+    conn.execute(
+        """UPDATE portfolio SET sell_price=?, sell_date=?, status='closed'
+           WHERE id=?""",
+        (sell_price, sell_date, position_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_open_positions():
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM portfolio WHERE status='open' ORDER BY buy_date DESC"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_closed_positions():
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM portfolio WHERE status='closed' ORDER BY sell_date DESC"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_all_positions():
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM portfolio ORDER BY status, buy_date DESC"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_position(position_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM portfolio WHERE id=?", (position_id,))
+    conn.commit()
+    conn.close()
+
+
+def save_portfolio_snapshot(total_value, total_cost, total_pnl, pnl_pct):
+    conn = get_conn()
+    conn.execute(
+        """INSERT INTO portfolio_snapshots (snapshot_at, total_value, total_cost,
+           total_pnl, pnl_pct) VALUES (?, ?, ?, ?, ?)""",
+        (datetime.utcnow().isoformat(), total_value, total_cost, total_pnl, pnl_pct)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_portfolio_snapshots(last_n=100):
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT * FROM portfolio_snapshots
+           ORDER BY snapshot_at DESC LIMIT ?""",
+        (last_n,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

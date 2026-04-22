@@ -93,7 +93,9 @@ if not watchlist:
     st.stop()
 
 # Tabs
-tab_overview, tab_detail, tab_accuracy, tab_backtest = st.tabs(["Overview", "Stock Detail", "Accuracy", "Backtest"])
+tab_overview, tab_detail, tab_accuracy, tab_backtest, tab_portfolio = st.tabs(
+    ["Overview", "Stock Detail", "Accuracy", "Backtest", "Portfolio"]
+)
 
 
 # ── TAB: Overview ────────────────────────────────────────────────────────────
@@ -335,8 +337,14 @@ with tab_backtest:
                                    format_func=lambda x: "Next Day" if x == "next_day" else "Weekly")
 
     if st.button("Run Backtest", width="content"):
-        with st.spinner(f"Backtesting {bt_ticker} ({bt_horizon})... this may take a minute."):
-            bt = run_backtest(bt_ticker, bt_horizon)
+        progress_bar = st.progress(0, text=f"Backtesting {bt_ticker} ({bt_horizon})...")
+
+        def update_progress(pct):
+            progress_bar.progress(min(pct, 1.0),
+                                  text=f"Backtesting {bt_ticker}... {int(pct*100)}%")
+
+        bt = run_backtest(bt_ticker, bt_horizon, progress_callback=update_progress)
+        progress_bar.empty()
 
         if "error" in bt:
             st.error(bt["error"])
@@ -404,6 +412,192 @@ with tab_backtest:
                                     "Confidence %", "Actual Move %", "Correct"]
                 show_df["Correct"] = show_df["Correct"].map({True: "✅", False: "❌"})
                 st.dataframe(show_df, width="stretch", hide_index=True)
+
+
+# ── TAB: Portfolio ───────────────────────────────────────────────────────────
+
+with tab_portfolio:
+    st.subheader("Portfolio Tracker")
+    st.caption("Log your positions and track P&L against model signals.")
+
+    # ── Add new position ─────────────────────────────────────────────────
+    with st.expander("➕ Add Position", expanded=False):
+        pc1, pc2, pc3, pc4 = st.columns(4)
+        with pc1:
+            pos_ticker = st.text_input("Ticker", placeholder="AAPL", key="pos_ticker")
+        with pc2:
+            pos_shares = st.number_input("Shares", min_value=0.01, value=1.0,
+                                          step=1.0, key="pos_shares")
+        with pc3:
+            pos_price = st.number_input("Buy Price ($)", min_value=0.01,
+                                         value=100.0, step=0.01, key="pos_price")
+        with pc4:
+            pos_date = st.date_input("Buy Date", key="pos_date")
+
+        pos_notes = st.text_input("Notes (optional)", key="pos_notes")
+
+        if st.button("Add Position"):
+            if pos_ticker:
+                try:
+                    db.add_position(pos_ticker, pos_shares, pos_price,
+                                     pos_date.strftime("%Y-%m-%d"), pos_notes)
+                    st.success(f"Added {pos_shares} shares of {pos_ticker.upper()} @ ${pos_price}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {e}")
+            else:
+                st.warning("Enter a ticker symbol")
+
+    # ── Open positions ───────────────────────────────────────────────────
+    open_positions = db.get_open_positions()
+
+    if open_positions:
+        st.subheader("Open Positions")
+
+        # Fetch current prices for all open tickers
+        open_tickers = list(set(p["ticker"] for p in open_positions))
+        price_map = {}
+        for t in open_tickers:
+            try:
+                pd_info = fetch_current_price(t)
+                price_map[t] = pd_info["price"]
+            except Exception:
+                price_map[t] = None
+
+        # Build positions table
+        pos_rows = []
+        total_cost = 0
+        total_value = 0
+        total_pnl = 0
+
+        for p in open_positions:
+            current = price_map.get(p["ticker"])
+            cost = p["shares"] * p["buy_price"]
+            total_cost += cost
+
+            if current:
+                value = p["shares"] * current
+                pnl = value - cost
+                pnl_pct = (pnl / cost) * 100
+                total_value += value
+                total_pnl += pnl
+            else:
+                value = None
+                pnl = None
+                pnl_pct = None
+
+            pos_rows.append({
+                "ID": p["id"],
+                "Ticker": p["ticker"],
+                "Shares": p["shares"],
+                "Buy Price": f"${p['buy_price']:.2f}",
+                "Current": f"${current:.2f}" if current else "—",
+                "Cost": f"${cost:.2f}",
+                "Value": f"${value:.2f}" if value else "—",
+                "P&L": f"${pnl:+.2f}" if pnl is not None else "—",
+                "P&L %": f"{pnl_pct:+.1f}%" if pnl_pct is not None else "—",
+                "Date": p["buy_date"],
+            })
+
+        # Summary metrics
+        sm1, sm2, sm3, sm4 = st.columns(4)
+        sm1.metric("Total Cost", f"${total_cost:,.2f}")
+        sm2.metric("Current Value", f"${total_value:,.2f}" if total_value else "—")
+        sm3.metric("Total P&L", f"${total_pnl:+,.2f}" if total_pnl else "—")
+        pnl_pct_total = (total_pnl / total_cost * 100) if total_cost > 0 else 0
+        sm4.metric("Return", f"{pnl_pct_total:+.1f}%")
+
+        # Save snapshot for history tracking (once per refresh)
+        if total_value > 0:
+            try:
+                db.save_portfolio_snapshot(total_value, total_cost, total_pnl,
+                                           round(pnl_pct_total, 2))
+            except Exception:
+                pass
+
+        # Positions table
+        pos_df = pd.DataFrame(pos_rows)
+        st.dataframe(pos_df, width="stretch", hide_index=True)
+
+        # Close position form
+        with st.expander("📤 Close a Position"):
+            close_id = st.selectbox(
+                "Select position to close",
+                [f"{p['ID']} — {p['Ticker']} ({p['Shares']} shares @ {p['Buy Price']})"
+                 for p in pos_rows],
+                key="close_select"
+            )
+            close_price = st.number_input("Sell Price ($)", min_value=0.01,
+                                           value=100.0, step=0.01, key="close_price")
+            if st.button("Close Position"):
+                pid = int(close_id.split(" — ")[0])
+                db.close_position(pid, close_price)
+                st.success("Position closed!")
+                st.rerun()
+
+        # Delete position
+        with st.expander("🗑️ Delete a Position"):
+            del_id = st.selectbox(
+                "Select position to delete",
+                [f"{p['ID']} — {p['Ticker']} ({p['Shares']} shares @ {p['Buy Price']})"
+                 for p in pos_rows],
+                key="del_select"
+            )
+            if st.button("Delete Position"):
+                pid = int(del_id.split(" — ")[0])
+                db.delete_position(pid)
+                st.success("Position deleted!")
+                st.rerun()
+
+    else:
+        st.info("No open positions. Add one above to start tracking your portfolio.")
+
+    # ── Closed positions ─────────────────────────────────────────────────
+    closed = db.get_closed_positions()
+    if closed:
+        with st.expander(f"📋 Closed Positions ({len(closed)})"):
+            closed_rows = []
+            total_realized = 0
+            for p in closed:
+                cost = p["shares"] * p["buy_price"]
+                revenue = p["shares"] * (p["sell_price"] or 0)
+                pnl = revenue - cost
+                total_realized += pnl
+                closed_rows.append({
+                    "Ticker": p["ticker"],
+                    "Shares": p["shares"],
+                    "Buy": f"${p['buy_price']:.2f}",
+                    "Sell": f"${p['sell_price']:.2f}" if p["sell_price"] else "—",
+                    "P&L": f"${pnl:+.2f}",
+                    "P&L %": f"{(pnl/cost*100):+.1f}%" if cost > 0 else "—",
+                    "Bought": p["buy_date"],
+                    "Sold": p["sell_date"] or "—",
+                })
+            st.metric("Total Realized P&L", f"${total_realized:+,.2f}")
+            st.dataframe(pd.DataFrame(closed_rows), width="stretch", hide_index=True)
+
+    # ── Portfolio value over time ────────────────────────────────────────
+    snapshots = db.get_portfolio_snapshots(last_n=500)
+    if len(snapshots) > 2:
+        with st.expander("📈 Portfolio Value History"):
+            snap_df = pd.DataFrame(snapshots)
+            snap_df["snapshot_at"] = pd.to_datetime(snap_df["snapshot_at"])
+            snap_df = snap_df.sort_values("snapshot_at")
+
+            fig_port = go.Figure()
+            fig_port.add_trace(go.Scatter(
+                x=snap_df["snapshot_at"], y=snap_df["total_value"],
+                name="Portfolio Value", line=dict(color="#4CAF50", width=2),
+            ))
+            fig_port.add_trace(go.Scatter(
+                x=snap_df["snapshot_at"], y=snap_df["total_cost"],
+                name="Total Cost", line=dict(color="#FF9800", width=1, dash="dash"),
+            ))
+            fig_port.update_layout(
+                height=350, yaxis_title="$",
+                template="plotly_dark", margin=dict(t=20, b=20),
+            )
+            st.plotly_chart(fig_port, width="stretch")
 
 
 # ── Footer ───────────────────────────────────────────────────────────────────

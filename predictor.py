@@ -11,7 +11,11 @@ import ta
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.preprocessing import StandardScaler
-from xgboost import XGBClassifier
+try:
+    from xgboost import XGBClassifier
+    HAS_XGBOOST = True
+except ImportError:
+    HAS_XGBOOST = False
 from pathlib import Path
 from datetime import datetime
 
@@ -26,7 +30,7 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 def _get_models():
     """Return dict of named models for the ensemble."""
-    return {
+    models = {
         "GradientBoosting": GradientBoostingClassifier(
             n_estimators=100, max_depth=4, learning_rate=0.1,
             subsample=0.8, random_state=42,
@@ -35,13 +39,15 @@ def _get_models():
             n_estimators=150, max_depth=6, min_samples_leaf=5,
             random_state=42, n_jobs=-1,
         ),
-        "XGBoost": XGBClassifier(
+    }
+    if HAS_XGBOOST:
+        models["XGBoost"] = XGBClassifier(
             n_estimators=100, max_depth=4, learning_rate=0.1,
             subsample=0.8, colsample_bytree=0.8,
             random_state=42, eval_metric="logloss",
             verbosity=0,
-        ),
-    }
+        )
+    return models
 
 
 # ── Feature engineering ──────────────────────────────────────────────────────
@@ -240,9 +246,11 @@ def train_model(ticker: str, horizon: str = "next_day") -> dict:
             }
         except Exception as e:
             cv_results[name] = {"accuracy": 0, "std": 0, "error": str(e)}
+            print(f"[WARN] {name} failed for {ticker}/{horizon}: {e}")
 
     if not trained:
-        return {"error": "All models failed to train"}
+        errors = {k: v.get("error", "unknown") for k, v in cv_results.items() if "error" in v}
+        return {"error": f"All models failed to train: {errors}"}
 
     # Save ensemble bundle
     model_path = MODELS_DIR / f"{ticker}_{horizon}.pkl"
