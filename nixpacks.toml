@@ -5,4 +5,4 @@ nixPkgs = ["python312"]
 cmds = ["pip install -r requirements.txt"]
 
 [start]
-cmd = "python worker.py"
+cmd = "bash start.sh"

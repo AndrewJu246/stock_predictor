@@ -14,7 +14,21 @@ CONFIG_PATH = Path(__file__).parent / "config.json"
 
 
 def _get_email_config():
-    """Load email settings from config.json."""
+    """Load email settings from env vars (Railway) or config.json (local)."""
+    import os
+
+    # Check env vars first (Railway deployment)
+    if os.environ.get("EMAIL_ENABLED", "").lower() == "true":
+        return {
+            "enabled": True,
+            "smtp_server": os.environ.get("EMAIL_SMTP_SERVER", "smtp.gmail.com"),
+            "smtp_port": int(os.environ.get("EMAIL_SMTP_PORT", "587")),
+            "from_address": os.environ.get("EMAIL_FROM", ""),
+            "password": os.environ.get("EMAIL_PASSWORD", ""),
+            "to_address": os.environ.get("EMAIL_TO", ""),
+        }
+
+    # Fall back to config.json
     with open(CONFIG_PATH) as f:
         cfg = json.load(f)
     return cfg.get("settings", {}).get("email", {})

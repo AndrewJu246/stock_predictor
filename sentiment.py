@@ -26,20 +26,28 @@ HF_API_URL = None
 
 
 def _load_hf_token():
-    """Load HF token from config.json if available."""
+    """Load HF token from env var (Railway) or config.json (local)."""
     global HF_HEADERS
-    try:
-        import json
-        from pathlib import Path
-        cfg_path = Path(__file__).parent / "config.json"
-        with open(cfg_path) as f:
-            cfg = json.load(f)
-        token = cfg.get("settings", {}).get("hf_token", "")
-        if token:
-            HF_HEADERS["Authorization"] = f"Bearer {token}"
-            return True
-    except Exception:
-        pass
+    import os
+
+    # Check env var first (Railway deployment)
+    token = os.environ.get("HF_TOKEN", "")
+
+    # Fall back to config.json
+    if not token:
+        try:
+            import json
+            from pathlib import Path
+            cfg_path = Path(__file__).parent / "config.json"
+            with open(cfg_path) as f:
+                cfg = json.load(f)
+            token = cfg.get("settings", {}).get("hf_token", "")
+        except Exception:
+            pass
+
+    if token:
+        HF_HEADERS["Authorization"] = f"Bearer {token}"
+        return True
     return False
 
 
