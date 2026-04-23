@@ -21,9 +21,9 @@ st.set_page_config(
 refresh_count = st_autorefresh(interval=5 * 60 * 1000, key="auto_refresh")
 
 import db
-from data_fetcher import get_watchlist, add_ticker, remove_ticker, fetch_current_price, fetch_stock_data
+from data_fetcher import get_watchlist, add_ticker, remove_ticker, fetch_current_price, fetch_stock_data, fetch_fear_greed
 from sentiment import get_ticker_sentiment, get_engine_name
-from predictor import predict, predict_all, resolve_predictions, train_model
+from predictor import predict, predict_all, resolve_predictions, train_model, get_feature_importance
 from backtester import run_backtest
 from risk_manager import calculate_stop_loss, calculate_position_size, analyze_diversification
 
@@ -94,8 +94,8 @@ if not watchlist:
     st.stop()
 
 # Tabs
-tab_overview, tab_detail, tab_accuracy, tab_backtest, tab_portfolio = st.tabs(
-    ["Overview", "Stock Detail", "Accuracy", "Backtest", "Portfolio"]
+tab_overview, tab_detail, tab_accuracy, tab_backtest, tab_portfolio, tab_features = st.tabs(
+    ["Overview", "Stock Detail", "Accuracy", "Backtest", "Portfolio", "Features"]
 )
 
 
@@ -103,6 +103,41 @@ tab_overview, tab_detail, tab_accuracy, tab_backtest, tab_portfolio = st.tabs(
 
 with tab_overview:
     st.subheader("Market Overview")
+
+    # Fear & Greed Index
+    try:
+        fg = fetch_fear_greed()
+        if fg.get("score") is not None:
+            fg_score = fg["score"]
+            fg_rating = fg["rating"].title()
+            fg_hist = fg.get("history", {})
+
+            # Color based on score
+            if fg_score <= 25:
+                fg_color = "🔴"
+            elif fg_score <= 45:
+                fg_color = "🟠"
+            elif fg_score <= 55:
+                fg_color = "🟡"
+            elif fg_score <= 75:
+                fg_color = "🟢"
+            else:
+                fg_color = "🟢"
+
+            fg_cols = st.columns([1, 1, 1, 1, 1])
+            fg_cols[0].metric("Fear & Greed", f"{fg_color} {fg_score:.0f}", fg_rating)
+            if fg_hist.get("1w"):
+                fg_cols[1].metric("1 Week Ago", f"{fg_hist['1w']:.0f}")
+            if fg_hist.get("1m"):
+                fg_cols[2].metric("1 Month Ago", f"{fg_hist['1m']:.0f}")
+            if fg_hist.get("3m"):
+                fg_cols[3].metric("3 Months Ago", f"{fg_hist['3m']:.0f}")
+            if fg_hist.get("1y"):
+                fg_cols[4].metric("1 Year Ago", f"{fg_hist['1y']:.0f}")
+
+            st.markdown("---")
+    except Exception:
+        pass
 
     # Predictions
     horizon = st.radio("Prediction horizon", ["next_day", "weekly"],
@@ -681,6 +716,68 @@ with tab_portfolio:
                 template="plotly_dark", margin=dict(t=20, b=20),
             )
             st.plotly_chart(fig_port, width="stretch")
+
+
+# ── TAB: Features ────────────────────────────────────────────────────────────
+
+with tab_features:
+    st.subheader("Feature Importance Analysis")
+    st.caption("See which factors drive the model's predictions most. "
+               "This helps you understand what the model is actually learning.")
+
+    fi_col1, fi_col2 = st.columns(2)
+    with fi_col1:
+        fi_ticker = st.selectbox("Ticker", watchlist, key="fi_ticker")
+    with fi_col2:
+        fi_horizon = st.selectbox("Horizon", ["next_day", "weekly"], key="fi_horizon",
+                                   format_func=lambda x: "Next Day" if x == "next_day" else "Weekly")
+
+    fi = get_feature_importance(fi_ticker, fi_horizon)
+
+    if "error" in fi:
+        st.warning(fi["error"])
+    else:
+        # Category breakdown
+        st.subheader("What Drives Predictions")
+        cat = fi["category_breakdown"]
+        if cat:
+            cat_cols = st.columns(len(cat))
+            for i, (category, pct) in enumerate(cat.items()):
+                cat_cols[i].metric(category, f"{pct}%")
+
+        st.markdown("---")
+
+        # Top features bar chart
+        st.subheader(f"Top 20 Features ({fi['num_features']} total)")
+        top = fi["top_features"]
+        if top:
+            feat_names = [f[0] for f in top]
+            feat_scores = [f[1] for f in top]
+
+            fig_fi = go.Figure()
+            fig_fi.add_trace(go.Bar(
+                x=feat_scores,
+                y=feat_names,
+                orientation="h",
+                marker_color="#4CAF50",
+            ))
+            fig_fi.update_layout(
+                height=max(400, len(top) * 25),
+                yaxis=dict(autorange="reversed"),
+                xaxis_title="Importance Score",
+                template="plotly_dark",
+                margin=dict(t=10, b=20, l=200),
+            )
+            st.plotly_chart(fig_fi, width="stretch")
+
+        # Full feature list
+        with st.expander(f"All {fi['num_features']} features"):
+            all_feats = fi["all_features"]
+            feat_df = pd.DataFrame(all_feats, columns=["Feature", "Importance"])
+            feat_df["Importance"] = feat_df["Importance"].apply(lambda x: f"{x:.6f}")
+            feat_df.index = range(1, len(feat_df) + 1)
+            feat_df.index.name = "Rank"
+            st.dataframe(feat_df, width="stretch")
 
 
 # ── Footer ───────────────────────────────────────────────────────────────────

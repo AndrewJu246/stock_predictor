@@ -289,3 +289,68 @@ def fetch_earnings_proximity(ticker: str) -> dict:
 
     return {"next_earnings": None, "days_until": None, "is_near": False}
 
+
+# ── Fear & Greed Index ──────────────────────────────────────────────────────
+
+def fetch_fear_greed() -> dict:
+    """
+    Fetch current CNN Fear & Greed Index (cached 5 min).
+    Returns dict with score (0-100), rating, and historical snapshots.
+    """
+    cache_key = "fear_greed_current"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        import fear_greed
+        data = fear_greed.get()
+        result = {
+            "score": data["score"],
+            "rating": data["rating"],
+            "history": data.get("history", {}),
+            "indicators": data.get("indicators", {}),
+        }
+        _set_cached(cache_key, result)
+        return result
+    except Exception as e:
+        return {"score": None, "rating": "unavailable", "error": str(e)}
+
+
+def fetch_fear_greed_history(period: str = "6mo") -> pd.DataFrame:
+    """
+    Fetch historical Fear & Greed data as a DataFrame.
+    Aligns with stock data for feature engineering.
+    """
+    cache_key = f"fear_greed_hist_{period}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        import fear_greed
+        # Map our period to fear_greed's format
+        last_map = {"3mo": "3m", "6mo": "6m", "1y": "1y", "2y": "1y"}
+        last = last_map.get(period, "6m")
+
+        history = fear_greed.get_history(last=last)
+        if not history:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(history)
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.set_index("date")
+        df = df.rename(columns={"score": "fear_greed"})
+        df = df[["fear_greed"]]
+
+        # Add derived features
+        df["fear_greed_ma5"] = df["fear_greed"].rolling(5).mean()
+        df["fear_greed_change"] = df["fear_greed"].diff()
+        df["extreme_fear"] = (df["fear_greed"] < 25).astype(int)
+        df["extreme_greed"] = (df["fear_greed"] > 75).astype(int)
+
+        _set_cached(cache_key, df)
+        return df
+    except Exception:
+        return pd.DataFrame()
+

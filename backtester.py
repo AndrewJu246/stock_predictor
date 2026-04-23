@@ -13,7 +13,7 @@ except ImportError:
     pass
 from datetime import datetime
 
-from data_fetcher import fetch_stock_data, fetch_market_data
+from data_fetcher import fetch_stock_data, fetch_market_data, fetch_fear_greed_history
 from predictor import build_features, _get_models
 
 
@@ -41,6 +41,16 @@ def run_backtest(ticker: str, horizon: str = "next_day",
         market = fetch_market_data(period="2y")
         if not market.empty:
             df = df.join(market, how="left", rsuffix="_dup")
+            df = df[[c for c in df.columns if not c.endswith("_dup")]]
+            df = df.ffill()
+    except Exception:
+        pass
+
+    # Merge Fear & Greed history
+    try:
+        fg = fetch_fear_greed_history(period="2y")
+        if not fg.empty:
+            df = df.join(fg, how="left", rsuffix="_dup")
             df = df[[c for c in df.columns if not c.endswith("_dup")]]
             df = df.ffill()
     except Exception:
