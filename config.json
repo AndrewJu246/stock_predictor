@@ -19,6 +19,7 @@
       "buy": 0.55,
       "hold_low": 0.45,
       "sell": 0.3
-    }
+    },
+    "hf_token": "hf_your_token_here"
   }
 }
