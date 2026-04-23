@@ -70,7 +70,12 @@ def remove_ticker(ticker: str):
 # ── Stock data ───────────────────────────────────────────────────────────────
 
 def fetch_stock_data(ticker: str, period: str = "6mo") -> pd.DataFrame:
-    """Fetch OHLCV data for a ticker. Returns a DataFrame with technical columns."""
+    """Fetch OHLCV data for a ticker (cached 5 min)."""
+    cache_key = f"stock_{ticker}_{period}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     tk = yf.Ticker(ticker)
     df = tk.history(period=period, auto_adjust=True)
 
@@ -86,6 +91,7 @@ def fetch_stock_data(ticker: str, period: str = "6mo") -> pd.DataFrame:
     df["Return_5d"] = df["Close"].pct_change(5)
     df["Log_Volume"] = df["Volume"].apply(lambda v: np.log1p(v) if v > 0 else 0)
 
+    _set_cached(cache_key, df)
     return df
 
 
@@ -223,12 +229,14 @@ def fetch_market_data(period: str = "6mo") -> pd.DataFrame:
 
 
 def fetch_sector_data(ticker: str, period: str = "6mo") -> pd.DataFrame:
-    """
-    Fetch the sector ETF performance for a given ticker's sector.
-    """
+    """Fetch the sector ETF performance for a given ticker's sector (cached 5 min)."""
+    cache_key = f"sector_data_{ticker}_{period}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     try:
-        info = yf.Ticker(ticker).info
-        sector = info.get("sector", "")
+        sector = get_ticker_sector(ticker)
         etf_ticker = SECTOR_ETFS.get(sector)
 
         if not etf_ticker:
@@ -248,15 +256,22 @@ def fetch_sector_data(ticker: str, period: str = "6mo") -> pd.DataFrame:
         result["sector_return_5d"] = hist["Close"].pct_change(5)
         result["sector_momentum"] = hist["Close"].pct_change(20)
 
+        _set_cached(cache_key, result)
         return result
     except Exception:
         return pd.DataFrame()
 
 
 def get_ticker_sector(ticker: str) -> str:
-    """Get the sector for a ticker."""
+    """Get the sector for a ticker (cached 5 min)."""
+    cache_key = f"sector_{ticker}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
     try:
-        return yf.Ticker(ticker).info.get("sector", "Unknown")
+        sector = yf.Ticker(ticker).info.get("sector", "Unknown")
+        _set_cached(cache_key, sector)
+        return sector
     except Exception:
         return "Unknown"
 

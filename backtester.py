@@ -7,14 +7,10 @@ import pandas as pd
 import numpy as np
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
-try:
-    from xgboost import XGBClassifier
-except ImportError:
-    pass
 from datetime import datetime
 
 from data_fetcher import fetch_stock_data, fetch_market_data, fetch_fear_greed_history
-from predictor import build_features, _get_models
+from predictor import build_features
 
 
 def run_backtest(ticker: str, horizon: str = "next_day",
@@ -93,6 +89,18 @@ def run_backtest(ticker: str, horizon: str = "next_day",
     total_steps = len(range(start_idx, end_idx, test_step))
     step_count = 0
 
+    # Pre-create lightweight models (fewer estimators = much faster backtesting)
+    bt_models = {
+        "GradientBoosting": GradientBoostingClassifier(
+            n_estimators=50, max_depth=3, learning_rate=0.1,
+            subsample=0.8, random_state=42,
+        ),
+        "RandomForest": RandomForestClassifier(
+            n_estimators=80, max_depth=5, min_samples_leaf=5,
+            random_state=42, n_jobs=-1,
+        ),
+    }
+
     for i in range(start_idx, end_idx, test_step):
         step_count += 1
         if progress_callback:
@@ -114,13 +122,12 @@ def run_backtest(ticker: str, horizon: str = "next_day",
             X_test_scaled = scaler.transform(X_test)
 
             # Train all ensemble models and vote
-            ensemble_models = _get_models()
             votes_up = 0
             votes_total = 0
             weighted_up_score = 0
             total_weight = 0
 
-            for name, mdl in ensemble_models.items():
+            for name, mdl in bt_models.items():
                 try:
                     mdl.fit(X_train_scaled, y_train)
                     p_class = mdl.predict(X_test_scaled)[0]

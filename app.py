@@ -122,7 +122,7 @@ with tab_overview:
             elif fg_score <= 75:
                 fg_color = "🟢"
             else:
-                fg_color = "🟢"
+                fg_color = "🔵"
 
             fg_cols = st.columns([1, 1, 1, 1, 1])
             fg_cols[0].metric("Fear & Greed", f"{fg_color} {fg_score:.0f}", fg_rating)
@@ -153,8 +153,11 @@ with tab_overview:
             rows.append({
                 "Ticker": p.get("ticker", "?"),
                 "Price": "—",
+                "Change": "—",
                 "Signal": "Error",
+                "Direction": "—",
                 "Confidence": "—",
+                "Consensus": "—",
                 "Sentiment": "—",
                 "Model Acc.": "—",
                 "Track Acc.": "—",
@@ -274,7 +277,7 @@ with tab_detail:
             # Sentiment section
             st.subheader("News Sentiment")
             try:
-                sent = get_ticker_sentiment(selected, use_cache=False)
+                sent = get_ticker_sentiment(selected, use_cache=True)
                 sentiment_color = {"Positive": "🟢", "Negative": "🔴", "Neutral": "🟡"}
                 icon = sentiment_color.get(sent["label"], "⚪")
                 st.markdown(f"{icon} **{sent['label']}** (score: {sent['avg_sentiment']})")

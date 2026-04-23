@@ -1,12 +1,5 @@
 {
-  "watchlist": [
-    "AAPL",
-    "MSFT",
-    "GOOGL",
-    "AMZN",
-    "TSLA",
-    "LITE"
-  ],
+  "watchlist": ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA"],
   "settings": {
     "lookback_days": 180,
     "retrain_interval_hours": 24,
@@ -20,6 +13,14 @@
       "hold_low": 0.45,
       "sell": 0.3
     },
-    "hf_token": "hf_your_token_here"
+    "hf_token": "",
+    "email": {
+      "enabled": false,
+      "smtp_server": "smtp.gmail.com",
+      "smtp_port": 587,
+      "from_address": "",
+      "password": "",
+      "to_address": ""
+    }
   }
 }
