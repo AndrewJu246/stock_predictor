@@ -21,10 +21,11 @@ st.set_page_config(
 refresh_count = st_autorefresh(interval=5 * 60 * 1000, key="auto_refresh")
 
 import db
-from data_fetcher import get_watchlist, add_ticker, remove_ticker, fetch_current_price, fetch_stock_data
-from sentiment import get_ticker_sentiment
-from predictor import predict, predict_all, resolve_predictions, train_model
+from data_fetcher import get_watchlist, add_ticker, remove_ticker, fetch_current_price, fetch_stock_data, fetch_fear_greed
+from sentiment import get_ticker_sentiment, get_engine_name
+from predictor import predict, predict_all, resolve_predictions, train_model, get_feature_importance
 from backtester import run_backtest
+from risk_manager import calculate_stop_loss, calculate_position_size, analyze_diversification
 
 # Auto-resolve old predictions on every refresh cycle
 try:
@@ -86,15 +87,15 @@ if st.sidebar.button("🧠 Retrain All Models", width="stretch"):
 # ── Main content ─────────────────────────────────────────────────────────────
 
 st.title("Stock Predictor Dashboard")
-st.caption(f"Auto-refreshes every 5 min · Last update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · Cycle #{refresh_count}")
+st.caption(f"Auto-refreshes every 5 min · Sentiment: {get_engine_name()} · Last update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · Cycle #{refresh_count}")
 
 if not watchlist:
     st.info("Add some tickers in the sidebar to get started.")
     st.stop()
 
 # Tabs
-tab_overview, tab_detail, tab_accuracy, tab_backtest, tab_portfolio = st.tabs(
-    ["Overview", "Stock Detail", "Accuracy", "Backtest", "Portfolio"]
+tab_overview, tab_detail, tab_accuracy, tab_backtest, tab_portfolio, tab_features = st.tabs(
+    ["Overview", "Stock Detail", "Accuracy", "Backtest", "Portfolio", "Features"]
 )
 
 
@@ -102,6 +103,41 @@ tab_overview, tab_detail, tab_accuracy, tab_backtest, tab_portfolio = st.tabs(
 
 with tab_overview:
     st.subheader("Market Overview")
+
+    # Fear & Greed Index
+    try:
+        fg = fetch_fear_greed()
+        if fg.get("score") is not None:
+            fg_score = fg["score"]
+            fg_rating = fg["rating"].title()
+            fg_hist = fg.get("history", {})
+
+            # Color based on score
+            if fg_score <= 25:
+                fg_color = "🔴"
+            elif fg_score <= 45:
+                fg_color = "🟠"
+            elif fg_score <= 55:
+                fg_color = "🟡"
+            elif fg_score <= 75:
+                fg_color = "🟢"
+            else:
+                fg_color = "🔵"
+
+            fg_cols = st.columns([1, 1, 1, 1, 1])
+            fg_cols[0].metric("Fear & Greed", f"{fg_color} {fg_score:.0f}", fg_rating)
+            if fg_hist.get("1w"):
+                fg_cols[1].metric("1 Week Ago", f"{fg_hist['1w']:.0f}")
+            if fg_hist.get("1m"):
+                fg_cols[2].metric("1 Month Ago", f"{fg_hist['1m']:.0f}")
+            if fg_hist.get("3m"):
+                fg_cols[3].metric("3 Months Ago", f"{fg_hist['3m']:.0f}")
+            if fg_hist.get("1y"):
+                fg_cols[4].metric("1 Year Ago", f"{fg_hist['1y']:.0f}")
+
+            st.markdown("---")
+    except Exception:
+        pass
 
     # Predictions
     horizon = st.radio("Prediction horizon", ["next_day", "weekly"],
@@ -117,8 +153,11 @@ with tab_overview:
             rows.append({
                 "Ticker": p.get("ticker", "?"),
                 "Price": "—",
+                "Change": "—",
                 "Signal": "Error",
+                "Direction": "—",
                 "Confidence": "—",
+                "Consensus": "—",
                 "Sentiment": "—",
                 "Model Acc.": "—",
                 "Track Acc.": "—",
@@ -238,7 +277,7 @@ with tab_detail:
             # Sentiment section
             st.subheader("News Sentiment")
             try:
-                sent = get_ticker_sentiment(selected, use_cache=False)
+                sent = get_ticker_sentiment(selected, use_cache=True)
                 sentiment_color = {"Positive": "🟢", "Negative": "🔴", "Neutral": "🟡"}
                 icon = sentiment_color.get(sent["label"], "⚪")
                 st.markdown(f"{icon} **{sent['label']}** (score: {sent['avg_sentiment']})")
@@ -257,6 +296,61 @@ with tab_detail:
 
             except Exception as e:
                 st.warning(f"Could not fetch sentiment: {e}")
+
+        # ── Risk Management section (full width) ────────────────────────
+        st.markdown("---")
+        st.subheader(f"Risk Analysis — {selected}")
+
+        try:
+            sl = calculate_stop_loss(selected)
+            if "error" not in sl:
+                rc1, rc2, rc3 = st.columns(3)
+
+                with rc1:
+                    st.markdown("**ATR Stop-Loss Levels**")
+                    st.markdown(f"Conservative: **${sl['stop_conservative']}** "
+                                f"(-{sl['stop_conservative_pct']}%)")
+                    st.markdown(f"Moderate: **${sl['stop_moderate']}** "
+                                f"(-{sl['stop_moderate_pct']}%)")
+                    st.markdown(f"Aggressive: **${sl['stop_aggressive']}** "
+                                f"(-{sl['stop_aggressive_pct']}%)")
+
+                with rc2:
+                    st.markdown("**Fixed % Stop-Loss**")
+                    st.markdown(f"5%: ${sl['stop_5pct']}")
+                    st.markdown(f"8%: ${sl['stop_8pct']}")
+                    st.markdown(f"10%: ${sl['stop_10pct']}")
+                    st.markdown(f"Recent support: ${sl['recent_support']} "
+                                f"(-{sl['support_distance_pct']}%)")
+
+                with rc3:
+                    st.markdown("**Volatility**")
+                    st.markdown(f"Daily: {sl['daily_volatility_pct']}%")
+                    st.markdown(f"Annualized: {sl['annualized_volatility_pct']}%")
+                    st.markdown(f"ATR (14-day): ${sl['atr']}")
+
+                # Position sizing calculator
+                with st.expander("📐 Position Size Calculator"):
+                    ps_port = st.number_input("Your portfolio value ($)",
+                                               min_value=100.0, value=10000.0,
+                                               step=1000.0, key="ps_port")
+                    ps_risk = st.slider("Risk per trade (%)", 0.5, 5.0, 2.0,
+                                         0.5, key="ps_risk")
+
+                    sizing = calculate_position_size(selected, ps_port, ps_risk)
+                    if "error" not in sizing:
+                        st.markdown(f"**Recommended:** {sizing['recommended_shares']} shares "
+                                    f"(${sizing['position_value']:,.2f} = "
+                                    f"{sizing['position_pct_of_portfolio']:.1f}% of portfolio)")
+                        st.markdown(f"Max risk: ${sizing['max_risk_dollars']:.2f} | "
+                                    f"Stop-loss: {sizing['stop_loss_pct']}% | "
+                                    f"Risk per share: ${sizing['risk_per_share']:.2f}")
+                    else:
+                        st.warning(sizing["error"])
+            else:
+                st.warning(sl["error"])
+        except Exception as e:
+            st.warning(f"Could not calculate risk: {e}")
 
 
 # ── TAB: Accuracy ────────────────────────────────────────────────────────────
@@ -549,6 +643,33 @@ with tab_portfolio:
                 st.success("Position deleted!")
                 st.rerun()
 
+        # ── Diversification analysis ─────────────────────────────────────
+        st.markdown("---")
+        st.subheader("Portfolio Risk & Diversification")
+
+        try:
+            div = analyze_diversification(open_positions)
+            if "error" not in div:
+                dc1, dc2, dc3 = st.columns(3)
+                dc1.metric("Sectors", div["num_sectors"])
+                dc2.metric("Positions", div["num_positions"])
+                dc3.metric("Diversity Rating", div["diversity_rating"])
+
+                # Sector breakdown
+                if div["sector_breakdown"]:
+                    sect_df = pd.DataFrame(div["sector_breakdown"])
+                    sect_df.columns = ["Sector", "Value ($)", "Weight (%)"]
+                    st.dataframe(sect_df, width="stretch", hide_index=True)
+
+                # Warnings
+                for w in div.get("warnings", []):
+                    st.warning(w)
+
+                if not div.get("warnings"):
+                    st.success("Portfolio diversification looks healthy.")
+        except Exception as e:
+            st.warning(f"Could not analyze diversification: {e}")
+
     else:
         st.info("No open positions. Add one above to start tracking your portfolio.")
 
@@ -598,6 +719,68 @@ with tab_portfolio:
                 template="plotly_dark", margin=dict(t=20, b=20),
             )
             st.plotly_chart(fig_port, width="stretch")
+
+
+# ── TAB: Features ────────────────────────────────────────────────────────────
+
+with tab_features:
+    st.subheader("Feature Importance Analysis")
+    st.caption("See which factors drive the model's predictions most. "
+               "This helps you understand what the model is actually learning.")
+
+    fi_col1, fi_col2 = st.columns(2)
+    with fi_col1:
+        fi_ticker = st.selectbox("Ticker", watchlist, key="fi_ticker")
+    with fi_col2:
+        fi_horizon = st.selectbox("Horizon", ["next_day", "weekly"], key="fi_horizon",
+                                   format_func=lambda x: "Next Day" if x == "next_day" else "Weekly")
+
+    fi = get_feature_importance(fi_ticker, fi_horizon)
+
+    if "error" in fi:
+        st.warning(fi["error"])
+    else:
+        # Category breakdown
+        st.subheader("What Drives Predictions")
+        cat = fi["category_breakdown"]
+        if cat:
+            cat_cols = st.columns(len(cat))
+            for i, (category, pct) in enumerate(cat.items()):
+                cat_cols[i].metric(category, f"{pct}%")
+
+        st.markdown("---")
+
+        # Top features bar chart
+        st.subheader(f"Top 20 Features ({fi['num_features']} total)")
+        top = fi["top_features"]
+        if top:
+            feat_names = [f[0] for f in top]
+            feat_scores = [f[1] for f in top]
+
+            fig_fi = go.Figure()
+            fig_fi.add_trace(go.Bar(
+                x=feat_scores,
+                y=feat_names,
+                orientation="h",
+                marker_color="#4CAF50",
+            ))
+            fig_fi.update_layout(
+                height=max(400, len(top) * 25),
+                yaxis=dict(autorange="reversed"),
+                xaxis_title="Importance Score",
+                template="plotly_dark",
+                margin=dict(t=10, b=20, l=200),
+            )
+            st.plotly_chart(fig_fi, width="stretch")
+
+        # Full feature list
+        with st.expander(f"All {fi['num_features']} features"):
+            all_feats = fi["all_features"]
+            feat_df = pd.DataFrame(all_feats, columns=["Feature", "Importance"])
+            feat_df["Importance"] = feat_df["Importance"].apply(lambda x: f"{x:.6f}")
+            feat_df.index = range(1, len(feat_df) + 1)
+            feat_df.index.name = "Rank"
+            st.dataframe(feat_df, width="stretch")
 
 
 # ── Footer ───────────────────────────────────────────────────────────────────

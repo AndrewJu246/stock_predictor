@@ -20,7 +20,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 
 import db
-from data_fetcher import fetch_stock_data, fetch_market_data, fetch_sector_data
+from data_fetcher import fetch_stock_data, fetch_market_data, fetch_sector_data, fetch_fear_greed_history
 from sentiment import get_ticker_sentiment
 
 MODELS_DIR = Path(__file__).parent / "data" / "models"
@@ -137,6 +137,11 @@ def build_features(df: pd.DataFrame, sentiment_score: float = 0.0) -> pd.DataFra
     if "sector_return" in df.columns:
         feat["vs_sector"] = feat["return_1d"] - df["sector_return"]
 
+    # Fear & Greed Index (if present in df)
+    fg_cols = [c for c in df.columns if c.startswith(("fear_greed", "extreme_fear", "extreme_greed"))]
+    for col in fg_cols:
+        feat[col] = df[col]
+
     # Sentiment
     feat["sentiment"] = sentiment_score
 
@@ -174,6 +179,16 @@ def prepare_dataset(ticker: str, horizon: str = "next_day"):
         sector = fetch_sector_data(ticker, period="1y")
         if not sector.empty:
             df = df.join(sector, how="left", rsuffix="_dup")
+            df = df[[c for c in df.columns if not c.endswith("_dup")]]
+            df = df.ffill()
+    except Exception:
+        pass
+
+    # Merge Fear & Greed data
+    try:
+        fg = fetch_fear_greed_history(period="1y")
+        if not fg.empty:
+            df = df.join(fg, how="left", rsuffix="_dup")
             df = df[[c for c in df.columns if not c.endswith("_dup")]]
             df = df.ffill()
     except Exception:
@@ -293,6 +308,90 @@ def load_model(ticker: str, horizon: str = "next_day"):
     return bundle
 
 
+# ── Feature importance ───────────────────────────────────────────────────────
+
+def get_feature_importance(ticker: str, horizon: str = "next_day", top_n: int = 20) -> dict:
+    """
+    Extract and aggregate feature importance across all ensemble models.
+    Returns ranked features with importance scores.
+    """
+    bundle = load_model(ticker, horizon)
+    if bundle is None:
+        return {"error": "No trained model found. Run a prediction first."}
+
+    models = bundle["models"]
+    feature_names = bundle["features"]
+
+    # Collect importances from each model
+    all_importances = {}
+    model_contributions = {}
+
+    for name, model in models.items():
+        try:
+            if hasattr(model, "feature_importances_"):
+                importances = model.feature_importances_
+                model_contributions[name] = dict(zip(feature_names, importances))
+
+                for feat, imp in zip(feature_names, importances):
+                    if feat not in all_importances:
+                        all_importances[feat] = []
+                    all_importances[feat].append(imp)
+        except Exception:
+            continue
+
+    if not all_importances:
+        return {"error": "Could not extract feature importances"}
+
+    # Average importance across models
+    avg_importance = {
+        feat: round(sum(scores) / len(scores), 6)
+        for feat, scores in all_importances.items()
+    }
+
+    # Sort by importance
+    ranked = sorted(avg_importance.items(), key=lambda x: x[1], reverse=True)
+
+    # Categorize features
+    categories = {
+        "Technical": ["return_", "sma_", "ema_", "rsi", "macd", "bb_", "stoch_",
+                      "atr", "obv", "momentum_", "volume_", "volatility_",
+                      "price_vs_"],
+        "Market": ["sp500_", "vix_", "treasury_", "vs_market"],
+        "Sector": ["sector_", "vs_sector"],
+        "Sentiment": ["sentiment"],
+        "Fear & Greed": ["fear_greed", "extreme_fear", "extreme_greed"],
+        "Seasonality": ["day_of_week", "month"],
+    }
+
+    category_totals = {}
+    for feat, imp in avg_importance.items():
+        categorized = False
+        for cat, prefixes in categories.items():
+            if any(feat.startswith(p) or feat == p for p in prefixes):
+                category_totals[cat] = category_totals.get(cat, 0) + imp
+                categorized = True
+                break
+        if not categorized:
+            category_totals["Other"] = category_totals.get("Other", 0) + imp
+
+    # Normalize category totals to percentages
+    total_imp = sum(category_totals.values())
+    category_pct = {
+        cat: round((val / total_imp) * 100, 1) if total_imp > 0 else 0
+        for cat, val in sorted(category_totals.items(), key=lambda x: x[1], reverse=True)
+    }
+
+    return {
+        "ticker": ticker,
+        "horizon": horizon,
+        "top_features": ranked[:top_n],
+        "all_features": ranked,
+        "category_breakdown": category_pct,
+        "num_features": len(feature_names),
+        "num_models": len(model_contributions),
+    }
+
+
 # ── Prediction ───────────────────────────────────────────────────────────────
 
 def predict(ticker: str, horizon: str = "next_day") -> dict:
@@ -333,6 +432,14 @@ def predict(ticker: str, horizon: str = "next_day") -> dict:
         sector = fetch_sector_data(ticker, period="6mo")
         if not sector.empty:
             df = df.join(sector, how="left", rsuffix="_dup")
+            df = df[[c for c in df.columns if not c.endswith("_dup")]]
+            df = df.ffill()
+    except Exception:
+        pass
+    try:
+        fg = fetch_fear_greed_history(period="6mo")
+        if not fg.empty:
+            df = df.join(fg, how="left", rsuffix="_dup")
             df = df[[c for c in df.columns if not c.endswith("_dup")]]
             df = df.ffill()
     except Exception:

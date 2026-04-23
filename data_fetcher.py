@@ -70,7 +70,12 @@ def remove_ticker(ticker: str):
 # ── Stock data ───────────────────────────────────────────────────────────────
 
 def fetch_stock_data(ticker: str, period: str = "6mo") -> pd.DataFrame:
-    """Fetch OHLCV data for a ticker. Returns a DataFrame with technical columns."""
+    """Fetch OHLCV data for a ticker (cached 5 min)."""
+    cache_key = f"stock_{ticker}_{period}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     tk = yf.Ticker(ticker)
     df = tk.history(period=period, auto_adjust=True)
 
@@ -86,6 +91,7 @@ def fetch_stock_data(ticker: str, period: str = "6mo") -> pd.DataFrame:
     df["Return_5d"] = df["Close"].pct_change(5)
     df["Log_Volume"] = df["Volume"].apply(lambda v: np.log1p(v) if v > 0 else 0)
 
+    _set_cached(cache_key, df)
     return df
 
 
@@ -223,12 +229,14 @@ def fetch_market_data(period: str = "6mo") -> pd.DataFrame:
 
 
 def fetch_sector_data(ticker: str, period: str = "6mo") -> pd.DataFrame:
-    """
-    Fetch the sector ETF performance for a given ticker's sector.
-    """
+    """Fetch the sector ETF performance for a given ticker's sector (cached 5 min)."""
+    cache_key = f"sector_data_{ticker}_{period}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     try:
-        info = yf.Ticker(ticker).info
-        sector = info.get("sector", "")
+        sector = get_ticker_sector(ticker)
         etf_ticker = SECTOR_ETFS.get(sector)
 
         if not etf_ticker:
@@ -248,15 +256,22 @@ def fetch_sector_data(ticker: str, period: str = "6mo") -> pd.DataFrame:
         result["sector_return_5d"] = hist["Close"].pct_change(5)
         result["sector_momentum"] = hist["Close"].pct_change(20)
 
+        _set_cached(cache_key, result)
         return result
     except Exception:
         return pd.DataFrame()
 
 
 def get_ticker_sector(ticker: str) -> str:
-    """Get the sector for a ticker."""
+    """Get the sector for a ticker (cached 5 min)."""
+    cache_key = f"sector_{ticker}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
     try:
-        return yf.Ticker(ticker).info.get("sector", "Unknown")
+        sector = yf.Ticker(ticker).info.get("sector", "Unknown")
+        _set_cached(cache_key, sector)
+        return sector
     except Exception:
         return "Unknown"
 
@@ -288,4 +303,69 @@ def fetch_earnings_proximity(ticker: str) -> dict:
         pass
 
     return {"next_earnings": None, "days_until": None, "is_near": False}
+
+
+# ── Fear & Greed Index ──────────────────────────────────────────────────────
+
+def fetch_fear_greed() -> dict:
+    """
+    Fetch current CNN Fear & Greed Index (cached 5 min).
+    Returns dict with score (0-100), rating, and historical snapshots.
+    """
+    cache_key = "fear_greed_current"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        import fear_greed
+        data = fear_greed.get()
+        result = {
+            "score": data["score"],
+            "rating": data["rating"],
+            "history": data.get("history", {}),
+            "indicators": data.get("indicators", {}),
+        }
+        _set_cached(cache_key, result)
+        return result
+    except Exception as e:
+        return {"score": None, "rating": "unavailable", "error": str(e)}
+
+
+def fetch_fear_greed_history(period: str = "6mo") -> pd.DataFrame:
+    """
+    Fetch historical Fear & Greed data as a DataFrame.
+    Aligns with stock data for feature engineering.
+    """
+    cache_key = f"fear_greed_hist_{period}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        import fear_greed
+        # Map our period to fear_greed's format
+        last_map = {"3mo": "3m", "6mo": "6m", "1y": "1y", "2y": "1y"}
+        last = last_map.get(period, "6m")
+
+        history = fear_greed.get_history(last=last)
+        if not history:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(history)
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.set_index("date")
+        df = df.rename(columns={"score": "fear_greed"})
+        df = df[["fear_greed"]]
+
+        # Add derived features
+        df["fear_greed_ma5"] = df["fear_greed"].rolling(5).mean()
+        df["fear_greed_change"] = df["fear_greed"].diff()
+        df["extreme_fear"] = (df["fear_greed"] < 25).astype(int)
+        df["extreme_greed"] = (df["fear_greed"] > 75).astype(int)
+
+        _set_cached(cache_key, df)
+        return df
+    except Exception:
+        return pd.DataFrame()
 
