@@ -29,7 +29,7 @@ import db
 from data_fetcher import get_watchlist
 from predictor import predict, predict_all, resolve_predictions, train_model
 from sentiment import get_ticker_sentiment
-from notifier import send_signal_alert, send_daily_summary
+from notifier import send_daily_summary
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -121,9 +121,6 @@ def run_predictions():
         ok = sum(1 for p in predictions if "error" not in p)
         err = sum(1 for p in predictions if "error" in p)
         print(f"  {horizon}: {ok} predictions, {err} errors")
-
-    # Check for strong signals and notify
-    send_signal_alert(all_predictions)
 
     return all_predictions
 
