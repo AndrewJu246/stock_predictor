@@ -9,8 +9,9 @@ import numpy as np
 import pandas as pd
 import ta
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.base import clone
 from sklearn.feature_selection import VarianceThreshold, mutual_info_classif
-from sklearn.model_selection import TimeSeriesSplit, cross_val_score
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 try:
     from xgboost import XGBClassifier
@@ -380,15 +381,15 @@ def select_features(X: pd.DataFrame, y: pd.Series, max_features: int = MAX_FEATU
 
 def train_model(ticker: str, horizon: str = "next_day") -> dict:
     """Train a 3-model ensemble for the given ticker and horizon."""
-    X, y, combined = prepare_dataset(ticker, horizon)
+    X_raw, y, combined = prepare_dataset(ticker, horizon)
 
-    if X is None:
+    if X_raw is None:
         return {"error": f"Not enough data for {ticker}"}
 
-    # Feature selection — prune noise before training
-    X, selected_features, selection_info = select_features(X, y)
+    # Feature selection on full training set for the final model
+    X, selected_features, selection_info = select_features(X_raw, y)
 
-    # Scale features
+    # Final scaler and fit on full selected data
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
@@ -397,14 +398,38 @@ def train_model(ticker: str, horizon: str = "next_day") -> dict:
     cv_results = {}
     tscv = TimeSeriesSplit(n_splits=5)
 
+    # Per-fold CV with feature selection inside each fold (no leakage)
     for name, model in models.items():
+        fold_scores = []
         try:
-            cv_scores = cross_val_score(model, X_scaled, y, cv=tscv, scoring="accuracy")
+            for train_idx, test_idx in tscv.split(X_raw):
+                X_train_fold = X_raw.iloc[train_idx]
+                y_train_fold = y.iloc[train_idx]
+                X_test_fold = X_raw.iloc[test_idx]
+                y_test_fold = y.iloc[test_idx]
+
+                X_train_sel, fold_features, _ = select_features(X_train_fold, y_train_fold)
+                available_test = [f for f in fold_features if f in X_test_fold.columns]
+                X_test_sel = X_test_fold[available_test]
+                for f in fold_features:
+                    if f not in X_test_sel.columns:
+                        X_test_sel[f] = 0
+                X_test_sel = X_test_sel[fold_features]
+
+                fold_scaler = StandardScaler()
+                X_train_sc = fold_scaler.fit_transform(X_train_sel)
+                X_test_sc = fold_scaler.transform(X_test_sel)
+
+                fold_model = clone(model)
+                fold_model.fit(X_train_sc, y_train_fold)
+                fold_scores.append(fold_model.score(X_test_sc, y_test_fold))
+
+            # Fit final model on full selected+scaled data
             model.fit(X_scaled, y)
             trained[name] = model
             cv_results[name] = {
-                "accuracy": round(cv_scores.mean() * 100, 1),
-                "std": round(cv_scores.std() * 100, 1),
+                "accuracy": round(np.mean(fold_scores) * 100, 1),
+                "std": round(np.std(fold_scores) * 100, 1),
             }
         except Exception as e:
             cv_results[name] = {"accuracy": 0, "std": 0, "error": str(e)}
