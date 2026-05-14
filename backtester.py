@@ -69,10 +69,18 @@ def run_backtest(ticker: str, horizon: str = "next_day",
     # Filter out flat/noise days from training data
     combined = combined[combined["pct_change"].abs() >= noise_threshold]
 
-    # Magnitude-weighted training: big moves matter more
+    # Magnitude + class-balance weighted training
     mag_weights = combined["pct_change"].abs()
     mag_weights = mag_weights.clip(upper=mag_weights.quantile(0.95))
     mag_weights = (mag_weights / mag_weights.mean()).values
+
+    n_pos = int(combined["target"].sum())
+    n_neg = len(combined) - n_pos
+    class_balance = np.where(combined["target"].values == 1,
+                             len(combined) / (2 * max(n_pos, 1)),
+                             len(combined) / (2 * max(n_neg, 1)))
+    mag_weights = mag_weights * class_balance
+    mag_weights = mag_weights / mag_weights.mean()
 
     if len(combined) < train_window + 10:
         return {"error": "Not enough clean data after feature engineering"}

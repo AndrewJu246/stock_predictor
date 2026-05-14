@@ -467,14 +467,25 @@ with tab_backtest:
         if "error" in bt:
             st.error(bt["error"])
         else:
-            # Summary metrics
+            # Alpha-first summary metrics
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Accuracy", f"{bt['accuracy']}%")
-            m2.metric("Predictions", bt["total_predictions"])
-            m3.metric("Strategy Return", f"{bt['strategy_return']:+.1f}%")
-            m4.metric("Buy & Hold Return", f"{bt['buyhold_return']:+.1f}%")
+            alpha_val = bt.get("alpha", 0)
+            alpha_color = "normal" if alpha_val >= 0 else "inverse"
+            m1.metric("Alpha vs Buy & Hold", f"{alpha_val:+.1f}%",
+                      delta=f"{'Outperforming' if alpha_val > 0 else 'Underperforming'}",
+                      delta_color=alpha_color)
+            m2.metric("Sharpe Ratio", f"{bt.get('sharpe_ratio', 0):.2f}")
+            m3.metric("Max Drawdown", f"-{bt.get('max_drawdown', 0):.1f}%")
+            m4.metric("Win Rate", f"{bt.get('win_rate', 0):.1f}%")
 
-            st.caption(f"Period: {bt['date_range']}")
+            # Secondary metrics row
+            s1, s2, s3, s4 = st.columns(4)
+            s1.metric("Strategy Return", f"{bt['strategy_return']:+.1f}%")
+            s2.metric("Buy & Hold Return", f"{bt['buyhold_return']:+.1f}%")
+            s3.metric("Accuracy", f"{bt['accuracy']}%")
+            s4.metric("Expectancy", f"{bt.get('expectancy', 0):+.3f}%")
+
+            st.caption(f"Period: {bt['date_range']} · {bt['total_predictions']} predictions")
 
             if bt.get("high_confidence_count", 0) > 0:
                 st.info(f"High-confidence predictions (≥60%): "

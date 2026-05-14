@@ -10,6 +10,7 @@ import pandas as pd
 import ta
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.base import clone
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.feature_selection import VarianceThreshold, mutual_info_classif
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
@@ -34,7 +35,8 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 # ── Ensemble model definitions ───────────────────────────────────────────────
 
 def _get_models():
-    """Return dict of named models for the ensemble."""
+    """Return dict of named models for the ensemble.
+    Class balance is handled uniformly via sample_weight in train_model()."""
     models = {
         "GradientBoosting": GradientBoostingClassifier(
             n_estimators=100, max_depth=4, learning_rate=0.1,
@@ -391,10 +393,20 @@ def train_model(ticker: str, horizon: str = "next_day") -> dict:
     if X_raw is None:
         return {"error": f"Not enough data for {ticker}"}
 
-    # Magnitude-weighted training: big moves matter more than small ones
+    # Magnitude + class-balance weighted training
     mag_weights = combined.loc[X_raw.index, "pct_target"].abs()
     mag_weights = mag_weights.clip(upper=mag_weights.quantile(0.95))
     mag_weights = (mag_weights / mag_weights.mean()).values
+
+    # Class balance: compensate for bull-market bias in training data
+    n_pos = int(y.sum())
+    n_neg = len(y) - n_pos
+    scale_pos_weight = n_neg / n_pos if n_pos > 0 else 1.0
+    class_balance = np.where(y.values == 1,
+                             len(y) / (2 * max(n_pos, 1)),
+                             len(y) / (2 * max(n_neg, 1)))
+    mag_weights = mag_weights * class_balance
+    mag_weights = mag_weights / mag_weights.mean()
 
     # Feature selection on full training set for the final model
     X, selected_features, selection_info = select_features(X_raw, y)
@@ -437,7 +449,13 @@ def train_model(ticker: str, horizon: str = "next_day") -> dict:
 
             # Fit final model on full selected+scaled data
             model.fit(X_scaled, y, sample_weight=mag_weights)
-            trained[name] = model
+
+            # Calibrate probabilities via Platt scaling on held-out tail
+            cal_n = max(20, len(X_scaled) // 5)
+            calibrated = CalibratedClassifierCV(model, cv="prefit", method="sigmoid")
+            calibrated.fit(X_scaled[-cal_n:], y.iloc[-cal_n:],
+                           sample_weight=mag_weights[-cal_n:])
+            trained[name] = calibrated
             cv_results[name] = {
                 "accuracy": round(np.mean(fold_scores) * 100, 1),
                 "std": round(np.std(fold_scores) * 100, 1),
@@ -512,8 +530,13 @@ def get_feature_importance(ticker: str, horizon: str = "next_day", top_n: int = 
 
     for name, model in models.items():
         try:
-            if hasattr(model, "feature_importances_"):
-                importances = model.feature_importances_
+            # Unwrap CalibratedClassifierCV to access base model
+            base = model
+            if hasattr(model, "calibrated_classifiers_"):
+                base = model.calibrated_classifiers_[0].estimator
+
+            if hasattr(base, "feature_importances_"):
+                importances = base.feature_importances_
                 model_contributions[name] = dict(zip(feature_names, importances))
 
                 for feat, imp in zip(feature_names, importances):
