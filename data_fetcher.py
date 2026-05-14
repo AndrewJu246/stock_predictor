@@ -347,14 +347,19 @@ def fetch_earnings_history(ticker: str, period: str = "2y") -> pd.DataFrame:
         result = pd.DataFrame(index=hist.index)
         earnings_dates = sorted(earnings_dates)
 
-        days_to_earnings = []
+        days_to_list = []
+        days_since_list = []
         for day in hist.index:
-            future = [abs((ed - day).days) for ed in earnings_dates]
-            days_to_earnings.append(min(future) if future else 90)
+            future = [(ed - day).days for ed in earnings_dates if ed >= day]
+            past = [(day - ed).days for ed in earnings_dates if ed < day]
+            days_to_list.append(min(future) if future else 90)
+            days_since_list.append(min(past) if past else 90)
 
-        result["days_to_earnings"] = days_to_earnings
+        result["days_to_earnings"] = days_to_list
+        result["days_since_earnings"] = days_since_list
         result["earnings_near"] = (result["days_to_earnings"] <= 14).astype(int)
         result["earnings_week"] = (result["days_to_earnings"] <= 7).astype(int)
+        result["post_earnings"] = (result["days_since_earnings"] <= 5).astype(int)
 
         _set_cached(cache_key, result)
         return result
@@ -402,7 +407,7 @@ def fetch_fear_greed_history(period: str = "6mo") -> pd.DataFrame:
     try:
         import fear_greed
         # Map our period to fear_greed's format
-        last_map = {"3mo": "3m", "6mo": "6m", "1y": "1y", "2y": "1y"}
+        last_map = {"3mo": "3m", "6mo": "6m", "1y": "1y", "2y": "2y"}
         last = last_map.get(period, "6m")
 
         history = fear_greed.get_history(last=last)

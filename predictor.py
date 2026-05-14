@@ -153,7 +153,7 @@ def build_features(df: pd.DataFrame, sentiment_df: pd.DataFrame = None) -> pd.Da
         feat[col] = df[col]
 
     # Earnings proximity (if present in df)
-    earnings_cols = [c for c in df.columns if c.startswith(("days_to_earnings", "earnings_"))]
+    earnings_cols = [c for c in df.columns if c.startswith(("days_to_earnings", "days_since_earnings", "earnings_", "post_earnings"))]
     for col in earnings_cols:
         feat[col] = df[col]
 
@@ -571,7 +571,8 @@ def get_feature_importance(ticker: str, horizon: str = "next_day", top_n: int = 
         "Sector": ["sector_", "vs_sector"],
         "Sentiment": ["sentiment", "sentiment_ma5", "sentiment_change"],
         "Fear & Greed": ["fear_greed", "extreme_fear", "extreme_greed"],
-        "Earnings": ["days_to_earnings", "earnings_near", "earnings_week"],
+        "Earnings": ["days_to_earnings", "days_since_earnings", "earnings_near",
+                      "earnings_week", "post_earnings"],
         "Insider": ["insider_buys", "insider_sells", "insider_net", "insider_buy_30d",
                      "insider_sell_30d", "insider_net_30d", "insider_signal"],
         "Macro (FRED)": ["cpi", "cpi_yoy_change", "cpi_mom_change", "unemployment",
