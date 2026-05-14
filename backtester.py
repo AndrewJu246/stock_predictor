@@ -5,19 +5,15 @@ Simulates how the model would have performed historically.
 
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.base import clone
 from sklearn.preprocessing import StandardScaler
 from datetime import datetime
-try:
-    from xgboost import XGBClassifier
-    HAS_XGBOOST = True
-except ImportError:
-    HAS_XGBOOST = False
 
-from data_fetcher import (fetch_stock_data, fetch_market_data, fetch_fear_greed_history,
-                          fetch_earnings_history, fetch_insider_transactions,
-                          fetch_fred_data, fetch_fundamentals)
-from predictor import build_features, _merge_external, _prewarm_shared_cache
+from data_fetcher import (fetch_stock_data, fetch_market_data, fetch_sector_data,
+                          fetch_fear_greed_history, fetch_earnings_history,
+                          fetch_insider_transactions, fetch_fred_data,
+                          fetch_fundamentals)
+from predictor import build_features, _merge_external, _prewarm_shared_cache, _get_models
 from sentiment import get_sentiment_history_df
 
 
@@ -41,6 +37,7 @@ def run_backtest(ticker: str, horizon: str = "next_day",
         return {"error": f"Not enough historical data for {ticker} (need {train_window + 30}+ days, got {len(df)})"}
 
     df = _merge_external(df, fetch_market_data, period="2y")
+    df = _merge_external(df, fetch_sector_data, ticker=ticker, period="2y")
     df = _merge_external(df, fetch_fear_greed_history, period="2y")
     df = _merge_external(df, fetch_earnings_history, ticker=ticker, period="2y")
     df = _merge_external(df, fetch_insider_transactions, ticker=ticker, period="2y")
@@ -84,23 +81,8 @@ def run_backtest(ticker: str, horizon: str = "next_day",
     total_steps = len(range(start_idx, end_idx, test_step))
     step_count = 0
 
-    # Pre-create lightweight models (fewer estimators = much faster backtesting)
-    bt_models = {
-        "GradientBoosting": GradientBoostingClassifier(
-            n_estimators=50, max_depth=3, learning_rate=0.1,
-            subsample=0.8, random_state=42,
-        ),
-        "RandomForest": RandomForestClassifier(
-            n_estimators=80, max_depth=5, min_samples_leaf=5,
-            random_state=42, n_jobs=-1,
-        ),
-    }
-    if HAS_XGBOOST:
-        bt_models["XGBoost"] = XGBClassifier(
-            n_estimators=50, max_depth=3, learning_rate=0.1,
-            subsample=0.8, colsample_bytree=0.8,
-            random_state=42, eval_metric="logloss", verbosity=0,
-        )
+    # Use same models as production for honest backtest results
+    bt_models = _get_models()
 
     for i in range(start_idx, end_idx, test_step):
         step_count += 1
@@ -130,6 +112,7 @@ def run_backtest(ticker: str, horizon: str = "next_day",
 
             for name, mdl in bt_models.items():
                 try:
+                    mdl = clone(mdl)
                     mdl.fit(X_train_scaled, y_train)
                     p_class = mdl.predict(X_test_scaled)[0]
                     p_proba = mdl.predict_proba(X_test_scaled)[0]
