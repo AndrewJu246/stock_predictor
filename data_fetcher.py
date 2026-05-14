@@ -420,3 +420,84 @@ def fetch_fear_greed_history(period: str = "6mo") -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
 
+
+# ── Insider Transactions (via yfinance) ────────────────────────────────────
+
+def fetch_insider_transactions(ticker: str, period: str = "2y") -> pd.DataFrame:
+    """
+    Fetch insider buy/sell transactions via yfinance.
+    Returns a date-indexed DataFrame with net insider activity signals.
+    """
+    cache_key = f"insider_{ticker}_{period}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        tk = yf.Ticker(ticker)
+        transactions = tk.insider_transactions
+        if transactions is None or transactions.empty:
+            return pd.DataFrame()
+
+        df = transactions.copy()
+
+        if "Start Date" in df.columns:
+            df["date"] = pd.to_datetime(df["Start Date"], errors="coerce")
+        elif "Date" in df.columns:
+            df["date"] = pd.to_datetime(df["Date"], errors="coerce")
+        else:
+            return pd.DataFrame()
+
+        df = df.dropna(subset=["date"])
+        if df.empty:
+            return pd.DataFrame()
+
+        if "Shares" not in df.columns and "Value" not in df.columns:
+            return pd.DataFrame()
+
+        shares_col = "Shares" if "Shares" in df.columns else None
+        text_col = "Text" if "Text" in df.columns else ("Transaction" if "Transaction" in df.columns else None)
+
+        buys = []
+        sells = []
+        for _, row in df.iterrows():
+            txt = str(row.get(text_col, "")).lower() if text_col else ""
+            shares = abs(float(row.get(shares_col, 0))) if shares_col else 0
+
+            if any(w in txt for w in ["purchase", "bought", "buy", "acquisition"]):
+                buys.append({"date": row["date"], "shares": shares, "type": "buy"})
+            elif any(w in txt for w in ["sale", "sold", "sell", "disposition"]):
+                sells.append({"date": row["date"], "shares": shares, "type": "sell"})
+
+        all_txns = buys + sells
+        if not all_txns:
+            return pd.DataFrame()
+
+        txn_df = pd.DataFrame(all_txns)
+        txn_df = txn_df.set_index("date").sort_index()
+
+        hist = tk.history(period=period, auto_adjust=True)
+        if hist.empty:
+            return pd.DataFrame()
+        if hist.index.tz is not None:
+            hist.index = hist.index.tz_localize(None)
+
+        result = pd.DataFrame(index=hist.index)
+
+        daily_buys = txn_df[txn_df["type"] == "buy"].resample("D")["shares"].sum()
+        daily_sells = txn_df[txn_df["type"] == "sell"].resample("D")["shares"].sum()
+
+        result["insider_buys"] = daily_buys.reindex(result.index).fillna(0)
+        result["insider_sells"] = daily_sells.reindex(result.index).fillna(0)
+        result["insider_net"] = result["insider_buys"] - result["insider_sells"]
+
+        result["insider_buy_30d"] = result["insider_buys"].rolling(30, min_periods=1).sum()
+        result["insider_sell_30d"] = result["insider_sells"].rolling(30, min_periods=1).sum()
+        result["insider_net_30d"] = result["insider_buy_30d"] - result["insider_sell_30d"]
+        result["insider_signal"] = np.sign(result["insider_net_30d"])
+
+        _set_cached(cache_key, result)
+        return result
+    except Exception:
+        return pd.DataFrame()
+

@@ -20,7 +20,9 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 import db
-from data_fetcher import fetch_stock_data, fetch_market_data, fetch_sector_data, fetch_fear_greed_history, fetch_earnings_history
+from data_fetcher import (fetch_stock_data, fetch_market_data, fetch_sector_data,
+                          fetch_fear_greed_history, fetch_earnings_history,
+                          fetch_insider_transactions)
 from sentiment import get_ticker_sentiment, get_sentiment_history_df
 
 MODELS_DIR = Path(__file__).parent / "data" / "models"
@@ -150,6 +152,11 @@ def build_features(df: pd.DataFrame, sentiment_df: pd.DataFrame = None) -> pd.Da
     for col in earnings_cols:
         feat[col] = df[col]
 
+    # Insider transaction signals (if present in df)
+    insider_cols = [c for c in df.columns if c.startswith("insider_")]
+    for col in insider_cols:
+        feat[col] = df[col]
+
     # ── Sentiment time series (joined by date) ──────────────────────────
     if sentiment_df is not None and not sentiment_df.empty:
         feat = feat.join(sentiment_df, how="left")
@@ -196,6 +203,7 @@ def prepare_dataset(ticker: str, horizon: str = "next_day"):
     df = _merge_external(df, fetch_sector_data, ticker=ticker, period="2y")
     df = _merge_external(df, fetch_fear_greed_history, period="2y")
     df = _merge_external(df, fetch_earnings_history, ticker=ticker, period="2y")
+    df = _merge_external(df, fetch_insider_transactions, ticker=ticker, period="2y")
 
     sentiment_df = get_sentiment_history_df(ticker)
     features = build_features(df, sentiment_df)
@@ -353,6 +361,8 @@ def get_feature_importance(ticker: str, horizon: str = "next_day", top_n: int = 
         "Sentiment": ["sentiment", "sentiment_ma5", "sentiment_change"],
         "Fear & Greed": ["fear_greed", "extreme_fear", "extreme_greed"],
         "Earnings": ["days_to_earnings", "earnings_near", "earnings_week"],
+        "Insider": ["insider_buys", "insider_sells", "insider_net", "insider_buy_30d",
+                     "insider_sell_30d", "insider_net_30d", "insider_signal"],
         "Seasonality": ["day_of_week", "month"],
     }
 
@@ -416,6 +426,7 @@ def predict(ticker: str, horizon: str = "next_day") -> dict:
     df = _merge_external(df, fetch_sector_data, ticker=ticker, period="6mo")
     df = _merge_external(df, fetch_fear_greed_history, period="6mo")
     df = _merge_external(df, fetch_earnings_history, ticker=ticker, period="6mo")
+    df = _merge_external(df, fetch_insider_transactions, ticker=ticker, period="6mo")
 
     # Fetch fresh sentiment (saves to daily_sentiment table) and get history
     try:
