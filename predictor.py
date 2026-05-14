@@ -391,6 +391,11 @@ def train_model(ticker: str, horizon: str = "next_day") -> dict:
     if X_raw is None:
         return {"error": f"Not enough data for {ticker}"}
 
+    # Magnitude-weighted training: big moves matter more than small ones
+    mag_weights = combined.loc[X_raw.index, "pct_target"].abs()
+    mag_weights = mag_weights.clip(upper=mag_weights.quantile(0.95))
+    mag_weights = (mag_weights / mag_weights.mean()).values
+
     # Feature selection on full training set for the final model
     X, selected_features, selection_info = select_features(X_raw, y)
 
@@ -426,11 +431,12 @@ def train_model(ticker: str, horizon: str = "next_day") -> dict:
                 X_test_sc = fold_scaler.transform(X_test_sel)
 
                 fold_model = clone(model)
-                fold_model.fit(X_train_sc, y_train_fold)
+                fold_weights = mag_weights[train_idx]
+                fold_model.fit(X_train_sc, y_train_fold, sample_weight=fold_weights)
                 fold_scores.append(fold_model.score(X_test_sc, y_test_fold))
 
             # Fit final model on full selected+scaled data
-            model.fit(X_scaled, y)
+            model.fit(X_scaled, y, sample_weight=mag_weights)
             trained[name] = model
             cv_results[name] = {
                 "accuracy": round(np.mean(fold_scores) * 100, 1),

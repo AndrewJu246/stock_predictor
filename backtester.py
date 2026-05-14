@@ -69,6 +69,11 @@ def run_backtest(ticker: str, horizon: str = "next_day",
     # Filter out flat/noise days from training data
     combined = combined[combined["pct_change"].abs() >= noise_threshold]
 
+    # Magnitude-weighted training: big moves matter more
+    mag_weights = combined["pct_change"].abs()
+    mag_weights = mag_weights.clip(upper=mag_weights.quantile(0.95))
+    mag_weights = (mag_weights / mag_weights.mean()).values
+
     if len(combined) < train_window + 10:
         return {"error": "Not enough clean data after feature engineering"}
 
@@ -113,7 +118,8 @@ def run_backtest(ticker: str, horizon: str = "next_day",
             for name, mdl in bt_models.items():
                 try:
                     mdl = clone(mdl)
-                    mdl.fit(X_train_scaled, y_train)
+                    train_weights = mag_weights[:len(train_data)]
+                    mdl.fit(X_train_scaled, y_train, sample_weight=train_weights)
                     p_class = mdl.predict(X_test_scaled)[0]
                     p_proba = mdl.predict_proba(X_test_scaled)[0]
                     conf = float(max(p_proba))
@@ -161,16 +167,18 @@ def run_backtest(ticker: str, horizon: str = "next_day",
     correct = df_results["correct"].sum()
     accuracy = round(correct / total * 100, 1) if total else 0
 
-    # Simulate simple strategy returns:
-    # If model says "up", go long; if "down", go flat (hold cash)
+    # Simulate confidence-proportional strategy returns:
+    # Position size scales with conviction — higher confidence = larger allocation
     strategy_returns = []
     buy_hold_returns = []
     for _, row in df_results.iterrows():
         daily_ret = row["actual_pct"] / 100
+        conf = row["confidence"] / 100
         if row["predicted"] == "up":
-            strategy_returns.append(daily_ret)
+            position_size = min(1.0, max(0.0, (conf - 0.5) * 3))
+            strategy_returns.append(daily_ret * position_size)
         else:
-            strategy_returns.append(0)  # Stay in cash
+            strategy_returns.append(0)
         buy_hold_returns.append(daily_ret)
 
     # Cumulative returns
@@ -200,6 +208,37 @@ def run_backtest(ticker: str, horizon: str = "next_day",
     high_conf = df_results[df_results["confidence"] >= 60]
     high_conf_acc = round(high_conf["correct"].mean() * 100, 1) if len(high_conf) > 0 else 0
 
+    # ── Alpha metrics ───────────────────────────────────────────────────
+    strategy_ret_pct = round((strategy_total - 1) * 100, 2)
+    buyhold_ret_pct = round((buyhold_total - 1) * 100, 2)
+    alpha = round(strategy_ret_pct - buyhold_ret_pct, 2)
+
+    # Sharpe ratio (annualized)
+    ret_array = np.array(strategy_returns)
+    if len(ret_array) > 1 and ret_array.std() > 0:
+        sharpe = round(np.sqrt(252) * ret_array.mean() / ret_array.std(), 2)
+    else:
+        sharpe = 0.0
+
+    # Max drawdown
+    running_max = 1.0
+    max_dd = 0.0
+    for eq in strategy_curve:
+        running_max = max(running_max, eq)
+        dd = (running_max - eq) / running_max
+        max_dd = max(max_dd, dd)
+    max_drawdown = round(max_dd * 100, 2)
+
+    # Win rate and expectancy
+    winning = df_results[df_results["correct"] == True]
+    losing = df_results[df_results["correct"] == False]
+    avg_win = abs(winning["actual_pct"].mean()) if len(winning) > 0 else 0
+    avg_loss = abs(losing["actual_pct"].mean()) if len(losing) > 0 else 0
+    win_rate = round(len(winning) / total * 100, 1) if total else 0
+    expectancy = round(
+        (win_rate / 100) * avg_win - (1 - win_rate / 100) * avg_loss, 3
+    ) if total else 0
+
     return {
         "ticker": ticker,
         "horizon": horizon,
@@ -208,8 +247,13 @@ def run_backtest(ticker: str, horizon: str = "next_day",
         "accuracy": accuracy,
         "high_confidence_accuracy": high_conf_acc,
         "high_confidence_count": len(high_conf),
-        "strategy_return": round((strategy_total - 1) * 100, 2),
-        "buyhold_return": round((buyhold_total - 1) * 100, 2),
+        "strategy_return": strategy_ret_pct,
+        "buyhold_return": buyhold_ret_pct,
+        "alpha": alpha,
+        "sharpe_ratio": sharpe,
+        "max_drawdown": max_drawdown,
+        "win_rate": win_rate,
+        "expectancy": expectancy,
         "results": df_results.to_dict("records"),
         "date_range": f"{results[0]['date']} to {results[-1]['date']}",
     }
