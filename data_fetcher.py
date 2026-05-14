@@ -293,7 +293,6 @@ def fetch_earnings_proximity(ticker: str) -> dict:
         tk = yf.Ticker(ticker)
         cal = tk.calendar
         if cal is not None and not cal.empty:
-            # Calendar format varies — try to extract earnings date
             if "Earnings Date" in cal.index:
                 dates = cal.loc["Earnings Date"]
                 if hasattr(dates, '__len__') and len(dates) > 0:
@@ -311,6 +310,50 @@ def fetch_earnings_proximity(ticker: str) -> dict:
         pass
 
     return {"next_earnings": None, "days_until": None, "is_near": False}
+
+
+def fetch_earnings_history(ticker: str, period: str = "2y") -> pd.DataFrame:
+    """Build a date-indexed DataFrame with days-to-nearest-earnings for each trading day."""
+    cache_key = f"earnings_hist_{ticker}_{period}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        tk = yf.Ticker(ticker)
+        hist = tk.history(period=period, auto_adjust=True)
+        if hist.empty:
+            return pd.DataFrame()
+
+        # Get historical earnings dates from the earnings_dates attribute
+        try:
+            edates = tk.get_earnings_dates(limit=20)
+            if edates is not None and not edates.empty:
+                earnings_dates = sorted(edates.index.tz_localize(None) if edates.index.tz else edates.index)
+            else:
+                return pd.DataFrame()
+        except Exception:
+            return pd.DataFrame()
+
+        if hist.index.tz is not None:
+            hist.index = hist.index.tz_localize(None)
+
+        result = pd.DataFrame(index=hist.index)
+        earnings_dates = sorted(earnings_dates)
+
+        days_to_earnings = []
+        for day in hist.index:
+            future = [abs((ed - day).days) for ed in earnings_dates]
+            days_to_earnings.append(min(future) if future else 90)
+
+        result["days_to_earnings"] = days_to_earnings
+        result["earnings_near"] = (result["days_to_earnings"] <= 14).astype(int)
+        result["earnings_week"] = (result["days_to_earnings"] <= 7).astype(int)
+
+        _set_cached(cache_key, result)
+        return result
+    except Exception:
+        return pd.DataFrame()
 
 
 # ── Fear & Greed Index ──────────────────────────────────────────────────────

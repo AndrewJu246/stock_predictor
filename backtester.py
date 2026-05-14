@@ -14,7 +14,7 @@ try:
 except ImportError:
     HAS_XGBOOST = False
 
-from data_fetcher import fetch_stock_data, fetch_market_data, fetch_fear_greed_history
+from data_fetcher import fetch_stock_data, fetch_market_data, fetch_fear_greed_history, fetch_earnings_history
 from predictor import build_features, _merge_external
 from sentiment import get_sentiment_history_df
 
@@ -40,6 +40,7 @@ def run_backtest(ticker: str, horizon: str = "next_day",
 
     df = _merge_external(df, fetch_market_data, period="2y")
     df = _merge_external(df, fetch_fear_greed_history, period="2y")
+    df = _merge_external(df, fetch_earnings_history, ticker=ticker, period="2y")
 
     # Use historical sentiment if available
     sentiment_df = get_sentiment_history_df(ticker)
