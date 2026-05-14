@@ -17,7 +17,7 @@ except ImportError:
 from data_fetcher import (fetch_stock_data, fetch_market_data, fetch_fear_greed_history,
                           fetch_earnings_history, fetch_insider_transactions,
                           fetch_fred_data)
-from predictor import build_features, _merge_external
+from predictor import build_features, _merge_external, _prewarm_shared_cache
 from sentiment import get_sentiment_history_df
 
 
@@ -229,6 +229,7 @@ def run_backtest(ticker: str, horizon: str = "next_day",
 def run_backtest_all(horizon: str = "next_day") -> list:
     """Run backtest for all watchlist tickers."""
     from data_fetcher import get_watchlist
+    _prewarm_shared_cache("2y")
     results = []
     for ticker in get_watchlist():
         try:

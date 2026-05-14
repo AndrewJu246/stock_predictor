@@ -670,9 +670,19 @@ def predict(ticker: str, horizon: str = "next_day") -> dict:
     }
 
 
+def _prewarm_shared_cache(period: str = "6mo"):
+    """Fetch ticker-independent data once so per-ticker predict() calls hit cache."""
+    for fetcher in [fetch_market_data, fetch_fear_greed_history, fetch_fred_data]:
+        try:
+            fetcher(period=period)
+        except Exception:
+            pass
+
+
 def predict_all(horizon: str = "next_day") -> list:
     """Run predictions for all watchlist tickers."""
     from data_fetcher import get_watchlist
+    _prewarm_shared_cache("6mo")
     results = []
     for ticker in get_watchlist():
         try:

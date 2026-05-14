@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import db
 from data_fetcher import get_watchlist
-from predictor import predict, predict_all, resolve_predictions, train_model
+from predictor import predict, predict_all, resolve_predictions, train_model, _prewarm_shared_cache
 from sentiment import get_ticker_sentiment
 from notifier import send_daily_summary
 
@@ -137,6 +137,7 @@ def run_retrain():
     """Retrain all models with latest data."""
     watchlist = get_watchlist()
     print(f"[{_now_str()}] Retraining models for {len(watchlist)} tickers...")
+    _prewarm_shared_cache("2y")
 
     for ticker in watchlist:
         for horizon in ["next_day", "weekly"]:
