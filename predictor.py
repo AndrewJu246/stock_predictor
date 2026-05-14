@@ -23,7 +23,8 @@ from datetime import datetime, timedelta, timezone
 import db
 from data_fetcher import (fetch_stock_data, fetch_market_data, fetch_sector_data,
                           fetch_fear_greed_history, fetch_earnings_history,
-                          fetch_insider_transactions, fetch_fred_data)
+                          fetch_insider_transactions, fetch_fred_data,
+                          fetch_fundamentals)
 from sentiment import get_ticker_sentiment, get_sentiment_history_df
 
 MODELS_DIR = Path(__file__).parent / "data" / "models"
@@ -165,6 +166,15 @@ def build_features(df: pd.DataFrame, sentiment_df: pd.DataFrame = None) -> pd.Da
     for col in fred_cols:
         feat[col] = df[col]
 
+    # Fundamental valuation (if present in df)
+    fund_cols = [c for c in df.columns if c.startswith((
+        "pe_ratio", "forward_pe", "peg_ratio", "price_to_book", "eps",
+        "revenue_growth", "earnings_growth", "profit_margin", "roe",
+        "debt_to_equity", "pe_vs_sector",
+    ))]
+    for col in fund_cols:
+        feat[col] = df[col]
+
     # ── Sentiment time series (joined by date) ──────────────────────────
     if sentiment_df is not None and not sentiment_df.empty:
         feat = feat.join(sentiment_df, how="left")
@@ -287,6 +297,7 @@ def prepare_dataset(ticker: str, horizon: str = "next_day"):
     df = _merge_external(df, fetch_earnings_history, ticker=ticker, period="2y")
     df = _merge_external(df, fetch_insider_transactions, ticker=ticker, period="2y")
     df = _merge_external(df, fetch_fred_data, period="2y")
+    df = _merge_external(df, fetch_fundamentals, ticker=ticker, period="2y")
 
     sentiment_df = get_sentiment_history_df(ticker)
     features = build_features(df, sentiment_df)
@@ -504,6 +515,9 @@ def get_feature_importance(ticker: str, horizon: str = "next_day", top_n: int = 
         "Macro (FRED)": ["cpi", "cpi_yoy_change", "cpi_mom_change", "unemployment",
                           "unemployment_change", "fed_funds", "fed_funds_change"],
         "Regime": ["regime", "regime_score", "sp500_above_200sma", "vix_high", "vix_extreme"],
+        "Fundamentals": ["pe_ratio", "forward_pe", "peg_ratio", "price_to_book", "eps",
+                          "revenue_growth", "earnings_growth", "profit_margin", "roe",
+                          "debt_to_equity", "pe_vs_sector"],
         "Seasonality": ["day_of_week", "month"],
     }
 
@@ -569,6 +583,7 @@ def predict(ticker: str, horizon: str = "next_day") -> dict:
     df = _merge_external(df, fetch_earnings_history, ticker=ticker, period="6mo")
     df = _merge_external(df, fetch_insider_transactions, ticker=ticker, period="6mo")
     df = _merge_external(df, fetch_fred_data, period="6mo")
+    df = _merge_external(df, fetch_fundamentals, ticker=ticker, period="6mo")
 
     # Fetch fresh sentiment (saves to daily_sentiment table) and get history
     try:

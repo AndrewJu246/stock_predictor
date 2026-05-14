@@ -22,17 +22,18 @@ _cache = {}
 _CACHE_TTL = 300  # 5 minutes
 
 
-def _get_cached(key):
+def _get_cached(key, ttl=None):
     """Return cached value if it exists and is fresh, else None."""
     if key in _cache:
-        val, ts = _cache[key]
-        if (datetime.now() - ts).total_seconds() < _CACHE_TTL:
+        val, ts, custom_ttl = _cache[key]
+        effective_ttl = ttl or custom_ttl or _CACHE_TTL
+        if (datetime.now() - ts).total_seconds() < effective_ttl:
             return val
     return None
 
 
-def _set_cached(key, val):
-    _cache[key] = (val, datetime.now())
+def _set_cached(key, val, ttl=None):
+    _cache[key] = (val, datetime.now(), ttl)
 
 
 def load_config():
@@ -598,3 +599,87 @@ def fetch_fred_data(period: str = "2y") -> pd.DataFrame:
 
     _set_cached(cache_key, result)
     return result
+
+
+# ── Fundamental Valuation Data ─────────────────────────────────────────────
+
+_FUNDAMENTALS_TTL = 86400  # 24 hours — fundamentals change quarterly
+
+FUNDAMENTAL_KEYS = {
+    "trailingPE": "pe_ratio",
+    "forwardPE": "forward_pe",
+    "pegRatio": "peg_ratio",
+    "priceToBook": "price_to_book",
+    "trailingEps": "eps",
+    "revenueGrowth": "revenue_growth",
+    "earningsGrowth": "earnings_growth",
+    "profitMargins": "profit_margin",
+    "returnOnEquity": "roe",
+    "debtToEquity": "debt_to_equity",
+}
+
+
+def fetch_fundamentals(ticker: str, period: str = "2y") -> pd.DataFrame:
+    """
+    Fetch fundamental valuation metrics for a ticker.
+    Returns a DataFrame with constant values across all trading days
+    (fundamentals change quarterly, forward-filled into daily data).
+    Cached for 24 hours.
+    """
+    cache_key = f"fundamentals_{ticker}"
+    cached = _get_cached(cache_key, ttl=_FUNDAMENTALS_TTL)
+    if cached is not None:
+        return cached
+
+    try:
+        tk = yf.Ticker(ticker)
+        info = tk.info
+        if not info:
+            return pd.DataFrame()
+
+        hist = tk.history(period=period, auto_adjust=True)
+        if hist.empty:
+            return pd.DataFrame()
+        if hist.index.tz is not None:
+            hist.index = hist.index.tz_localize(None)
+
+        result = pd.DataFrame(index=hist.index)
+
+        for yf_key, col_name in FUNDAMENTAL_KEYS.items():
+            val = info.get(yf_key)
+            if val is not None and val != 0:
+                result[col_name] = float(val)
+            else:
+                result[col_name] = np.nan
+
+        # Relative valuation vs sector median
+        sector = info.get("sector", "")
+        sector_pe = _get_sector_median_pe(sector)
+        if sector_pe and "pe_ratio" in result.columns:
+            pe_val = result["pe_ratio"].iloc[0]
+            if not np.isnan(pe_val) and sector_pe > 0:
+                result["pe_vs_sector"] = pe_val / sector_pe
+
+        _set_cached(cache_key, result, ttl=_FUNDAMENTALS_TTL)
+        return result
+    except Exception:
+        return pd.DataFrame()
+
+
+_SECTOR_PE_MEDIANS = {
+    "Technology": 30,
+    "Healthcare": 22,
+    "Financial Services": 14,
+    "Consumer Cyclical": 20,
+    "Consumer Defensive": 22,
+    "Energy": 12,
+    "Industrials": 20,
+    "Materials": 16,
+    "Real Estate": 35,
+    "Utilities": 18,
+    "Communication Services": 18,
+}
+
+
+def _get_sector_median_pe(sector: str) -> float:
+    return _SECTOR_PE_MEDIANS.get(sector, 0)
