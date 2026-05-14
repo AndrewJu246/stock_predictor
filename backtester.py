@@ -54,8 +54,10 @@ def run_backtest(ticker: str, horizon: str = "next_day",
     # Build target
     if horizon == "next_day":
         shift = -1
+        noise_threshold = 0.3  # pct_change is already in %, so 0.3 = 0.3%
     else:
         shift = -5
+        noise_threshold = 0.5
 
     target = (df["Close"].shift(shift) > df["Close"]).astype(int)
     pct_change = ((df["Close"].shift(shift) - df["Close"]) / df["Close"] * 100)
@@ -66,6 +68,9 @@ def run_backtest(ticker: str, horizon: str = "next_day",
     combined["pct_change"] = pct_change
     combined["close"] = df["Close"]
     combined = combined.dropna()
+
+    # Filter out flat/noise days from training data
+    combined = combined[combined["pct_change"].abs() >= noise_threshold]
 
     if len(combined) < train_window + 10:
         return {"error": "Not enough clean data after feature engineering"}

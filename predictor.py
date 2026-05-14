@@ -307,9 +307,11 @@ def prepare_dataset(ticker: str, horizon: str = "next_day"):
     if horizon == "next_day":
         target = (df["Close"].shift(-1) > df["Close"]).astype(int)
         pct_target = df["Close"].pct_change(1).shift(-1)
+        noise_threshold = 0.003  # 0.3% — below this is noise for daily
     else:  # weekly
         target = (df["Close"].shift(-5) > df["Close"]).astype(int)
         pct_target = df["Close"].pct_change(5).shift(-5)
+        noise_threshold = 0.005  # 0.5% — below this is noise for weekly
 
     # Combine and drop rows with any NaN (indicator warm-up + future target)
     combined = features.copy()
@@ -317,13 +319,16 @@ def prepare_dataset(ticker: str, horizon: str = "next_day"):
     combined["pct_target"] = pct_target
     combined = combined.dropna()
 
-    if len(combined) < 30:
-        return None, None, None
+    # Filter out "flat" days where the move is within noise range
+    # These are coin-flip labels that degrade training signal
+    meaningful = combined[combined["pct_target"].abs() >= noise_threshold]
+    if len(meaningful) < 30:
+        meaningful = combined  # fall back to full set if too few remain
 
-    X = combined.drop(columns=["target", "pct_target"])
-    y = combined["target"]
+    X = meaningful.drop(columns=["target", "pct_target"])
+    y = meaningful["target"]
 
-    return X, y, combined
+    return X, y, meaningful
 
 
 MAX_FEATURES = 30
