@@ -2,13 +2,18 @@
 data_fetcher.py — Pulls stock price data via yfinance and news via RSS feeds.
 """
 
+import os
 import yfinance as yf
 import feedparser
+import requests
 import pandas as pd
 import numpy as np
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
 
@@ -501,3 +506,95 @@ def fetch_insider_transactions(ticker: str, period: str = "2y") -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
 
+
+# ── FRED Macro Data ────────────────────────────────────────────────────────
+
+FRED_SERIES = {
+    "CPIAUCSL": "cpi",
+    "UNRATE": "unemployment",
+    "FEDFUNDS": "fed_funds",
+}
+
+FRED_BASE_URL = "https://api.stlouisfed.org/fred/series/observations"
+
+
+def _fetch_fred_series(series_id: str, api_key: str, period: str = "2y") -> pd.DataFrame:
+    """Fetch a single FRED series as a date-indexed DataFrame."""
+    period_days = {"3mo": 120, "6mo": 200, "1y": 400, "2y": 800}
+    lookback = period_days.get(period, 800)
+    start = (datetime.now() - timedelta(days=lookback)).strftime("%Y-%m-%d")
+
+    resp = requests.get(FRED_BASE_URL, params={
+        "series_id": series_id,
+        "api_key": api_key,
+        "file_type": "json",
+        "observation_start": start,
+    }, timeout=15)
+
+    if resp.status_code != 200:
+        return pd.DataFrame()
+
+    data = resp.json().get("observations", [])
+    if not data:
+        return pd.DataFrame()
+
+    rows = []
+    for obs in data:
+        if obs["value"] != ".":
+            rows.append({"date": obs["date"], "value": float(obs["value"])})
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date")
+    return df
+
+
+def fetch_fred_data(period: str = "2y") -> pd.DataFrame:
+    """
+    Fetch CPI, unemployment rate, and fed funds rate from FRED.
+    Monthly data forward-filled into daily frequency.
+    Requires FRED_API_KEY in .env (free at https://fred.stlouisfed.org/docs/api/api_key.html).
+    """
+    cache_key = f"fred_{period}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    api_key = os.environ.get("FRED_API_KEY", "")
+    if not api_key:
+        return pd.DataFrame()
+
+    result = pd.DataFrame()
+
+    for series_id, col_name in FRED_SERIES.items():
+        try:
+            df = _fetch_fred_series(series_id, api_key, period)
+            if not df.empty:
+                df = df.rename(columns={"value": col_name})
+                if result.empty:
+                    result = df
+                else:
+                    result = result.join(df, how="outer")
+        except Exception:
+            continue
+
+    if result.empty:
+        return result
+
+    # Resample monthly -> daily and forward-fill
+    result = result.resample("D").ffill()
+
+    # Derived features
+    if "cpi" in result.columns:
+        result["cpi_yoy_change"] = result["cpi"].pct_change(12)
+        result["cpi_mom_change"] = result["cpi"].pct_change(1)
+    if "fed_funds" in result.columns:
+        result["fed_funds_change"] = result["fed_funds"].diff()
+    if "unemployment" in result.columns:
+        result["unemployment_change"] = result["unemployment"].diff()
+
+    _set_cached(cache_key, result)
+    return result
