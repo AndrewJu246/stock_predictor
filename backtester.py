@@ -15,7 +15,8 @@ except ImportError:
     HAS_XGBOOST = False
 
 from data_fetcher import fetch_stock_data, fetch_market_data, fetch_fear_greed_history
-from predictor import build_features
+from predictor import build_features, _merge_external
+from sentiment import get_sentiment_history_df
 
 
 def run_backtest(ticker: str, horizon: str = "next_day",
@@ -37,28 +38,12 @@ def run_backtest(ticker: str, horizon: str = "next_day",
     if df.empty or len(df) < train_window + 30:
         return {"error": f"Not enough historical data for {ticker} (need {train_window + 30}+ days, got {len(df)})"}
 
-    # Fetch market-wide data and merge
-    try:
-        market = fetch_market_data(period="2y")
-        if not market.empty:
-            df = df.join(market, how="left", rsuffix="_dup")
-            df = df[[c for c in df.columns if not c.endswith("_dup")]]
-            df = df.ffill()
-    except Exception:
-        pass
+    df = _merge_external(df, fetch_market_data, period="2y")
+    df = _merge_external(df, fetch_fear_greed_history, period="2y")
 
-    # Merge Fear & Greed history
-    try:
-        fg = fetch_fear_greed_history(period="2y")
-        if not fg.empty:
-            df = df.join(fg, how="left", rsuffix="_dup")
-            df = df[[c for c in df.columns if not c.endswith("_dup")]]
-            df = df.ffill()
-    except Exception:
-        pass
-
-    # Build features (sentiment=0 for historical since we don't have it)
-    features = build_features(df, sentiment_score=0.0)
+    # Use historical sentiment if available
+    sentiment_df = get_sentiment_history_df(ticker)
+    features = build_features(df, sentiment_df)
 
     # Build target
     if horizon == "next_day":
@@ -69,18 +54,12 @@ def run_backtest(ticker: str, horizon: str = "next_day",
     target = (df["Close"].shift(shift) > df["Close"]).astype(int)
     pct_change = ((df["Close"].shift(shift) - df["Close"]) / df["Close"] * 100)
 
-    # Combine
+    # Combine and drop all NaN rows (indicator warm-up + future target)
     combined = features.copy()
     combined["target"] = target
     combined["pct_change"] = pct_change
     combined["close"] = df["Close"]
-
-    # Fill remaining NaNs in features with 0 (for early rows where indicators haven't warmed up)
-    feature_cols_only = [c for c in combined.columns if c not in ["target", "pct_change", "close"]]
-    combined[feature_cols_only] = combined[feature_cols_only].fillna(0)
-
-    # Only drop rows where target is NaN (beginning/end of series)
-    combined = combined.dropna(subset=["target", "pct_change"])
+    combined = combined.dropna()
 
     if len(combined) < train_window + 10:
         return {"error": "Not enough clean data after feature engineering"}

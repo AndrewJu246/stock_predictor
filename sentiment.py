@@ -223,17 +223,27 @@ def get_ticker_sentiment(ticker: str, use_cache: bool = True) -> dict:
 
     sentiments = [a["sentiment"] for a in articles]
     avg = sum(sentiments) / len(sentiments) if sentiments else 0.0
+    pos = sum(1 for s in sentiments if s > 0.05)
+    neg = sum(1 for s in sentiments if s < -0.05)
+    neu = sum(1 for s in sentiments if -0.05 <= s <= 0.05)
+    engine = "finbert" if HAS_FINBERT else "vader"
+
+    from datetime import date
+    db.save_daily_sentiment(
+        ticker, date.today().isoformat(), round(avg, 3),
+        len(articles), pos, neg, neu, engine
+    )
 
     return {
         "ticker": ticker,
         "avg_sentiment": round(avg, 3),
         "num_articles": len(articles),
-        "positive": sum(1 for s in sentiments if s > 0.05),
-        "negative": sum(1 for s in sentiments if s < -0.05),
-        "neutral": sum(1 for s in sentiments if -0.05 <= s <= 0.05),
+        "positive": pos,
+        "negative": neg,
+        "neutral": neu,
         "articles": articles,
         "label": _sentiment_label(avg),
-        "engine": "finbert" if HAS_FINBERT else "vader",
+        "engine": engine,
     }
 
 
@@ -244,6 +254,21 @@ def _sentiment_label(score: float) -> str:
         return "Negative"
     else:
         return "Neutral"
+
+
+def get_sentiment_history_df(ticker: str) -> "pd.DataFrame":
+    """Return historical daily sentiment as a date-indexed DataFrame."""
+    import pandas as pd
+    rows = db.get_sentiment_history(ticker)
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date")
+    df = df.rename(columns={"avg_score": "sentiment"})
+    df["sentiment_ma5"] = df["sentiment"].rolling(5, min_periods=1).mean()
+    df["sentiment_change"] = df["sentiment"].diff()
+    return df[["sentiment", "sentiment_ma5", "sentiment_change"]]
 
 
 def get_engine_name() -> str:

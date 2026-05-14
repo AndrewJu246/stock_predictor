@@ -206,9 +206,12 @@ def fetch_market_data(period: str = "6mo") -> pd.DataFrame:
     market = pd.DataFrame()
 
     indicators = {
-        "^GSPC": "sp500",      # S&P 500
-        "^VIX": "vix",         # Volatility Index
+        "^GSPC": "sp500",       # S&P 500
+        "^VIX": "vix",          # Volatility Index
         "^TNX": "treasury_10y", # 10-Year Treasury Yield
+        "^IRX": "treasury_3m",  # 3-Month Treasury Bill (short-term rates)
+        "^FVX": "treasury_5y",  # 5-Year Treasury Yield (mid curve)
+        "DX-Y.NYB": "usd",     # US Dollar Index
     }
 
     for symbol, name in indicators.items():
@@ -223,6 +226,11 @@ def fetch_market_data(period: str = "6mo") -> pd.DataFrame:
                 market[f"{name}_return_5d"] = hist["Close"].pct_change(5)
         except Exception:
             continue
+
+    # Derived macro features
+    if "treasury_10y_close" in market.columns and "treasury_3m_close" in market.columns:
+        market["yield_curve_spread"] = market["treasury_10y_close"] - market["treasury_3m_close"]
+        market["yield_curve_inverted"] = (market["yield_curve_spread"] < 0).astype(int)
 
     _set_cached(cache_key, market)
     return market

@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 import db
 from data_fetcher import fetch_stock_data, fetch_market_data, fetch_sector_data, fetch_fear_greed_history
-from sentiment import get_ticker_sentiment
+from sentiment import get_ticker_sentiment, get_sentiment_history_df
 
 MODELS_DIR = Path(__file__).parent / "data" / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -52,9 +52,10 @@ def _get_models():
 
 # ── Feature engineering ──────────────────────────────────────────────────────
 
-def build_features(df: pd.DataFrame, sentiment_score: float = 0.0) -> pd.DataFrame:
+def build_features(df: pd.DataFrame, sentiment_df: pd.DataFrame = None) -> pd.DataFrame:
     """Add technical indicator features to OHLCV dataframe.
-    If market/sector columns are present in df, those get included too."""
+    sentiment_df: date-indexed DataFrame with 'sentiment', 'sentiment_ma5',
+                  'sentiment_change' columns (from get_sentiment_history_df)."""
     feat = pd.DataFrame(index=df.index)
 
     # Price-based
@@ -124,7 +125,9 @@ def build_features(df: pd.DataFrame, sentiment_score: float = 0.0) -> pd.DataFra
     feat["momentum_20"] = ta.momentum.roc(df["Close"], window=20)
 
     # ── Market-wide features (if present in df) ──────────────────────────
-    market_cols = [c for c in df.columns if c.startswith(("sp500_", "vix_", "treasury_", "sector_"))]
+    market_cols = [c for c in df.columns if c.startswith((
+        "sp500_", "vix_", "treasury_", "sector_", "usd_", "yield_curve_",
+    ))]
     for col in market_cols:
         feat[col] = df[col]
 
@@ -142,8 +145,16 @@ def build_features(df: pd.DataFrame, sentiment_score: float = 0.0) -> pd.DataFra
     for col in fg_cols:
         feat[col] = df[col]
 
-    # Sentiment
-    feat["sentiment"] = sentiment_score
+    # ── Sentiment time series (joined by date) ──────────────────────────
+    if sentiment_df is not None and not sentiment_df.empty:
+        feat = feat.join(sentiment_df, how="left")
+        for col in ["sentiment", "sentiment_ma5", "sentiment_change"]:
+            if col in feat.columns:
+                feat[col] = feat[col].ffill().fillna(0)
+    else:
+        feat["sentiment"] = 0.0
+        feat["sentiment_ma5"] = 0.0
+        feat["sentiment_change"] = 0.0
 
     # Day of week (market patterns)
     feat["day_of_week"] = df.index.dayofweek
@@ -154,54 +165,36 @@ def build_features(df: pd.DataFrame, sentiment_score: float = 0.0) -> pd.DataFra
     return feat
 
 
+def _merge_external(df, fetcher, **kwargs):
+    """Join external data into df, handling dupes and gaps."""
+    try:
+        ext = fetcher(**kwargs)
+        if not ext.empty:
+            df = df.join(ext, how="left", rsuffix="_dup")
+            df = df[[c for c in df.columns if not c.endswith("_dup")]]
+            df = df.ffill()
+    except Exception:
+        pass
+    return df
+
+
 def prepare_dataset(ticker: str, horizon: str = "next_day"):
     """
     Build feature matrix X and target y.
     horizon: 'next_day' (1-day forward return) or 'weekly' (5-day forward return)
     """
-    df = fetch_stock_data(ticker, period="1y")
+    df = fetch_stock_data(ticker, period="2y")
     if df.empty or len(df) < 60:
         return None, None, None
 
-    # Merge market-wide data
-    try:
-        market = fetch_market_data(period="1y")
-        if not market.empty:
-            df = df.join(market, how="left", rsuffix="_dup")
-            # Drop any duplicate columns
-            df = df[[c for c in df.columns if not c.endswith("_dup")]]
-            df = df.ffill()
-    except Exception:
-        pass
+    df = _merge_external(df, fetch_market_data, period="2y")
+    df = _merge_external(df, fetch_sector_data, ticker=ticker, period="2y")
+    df = _merge_external(df, fetch_fear_greed_history, period="2y")
 
-    # Merge sector data
-    try:
-        sector = fetch_sector_data(ticker, period="1y")
-        if not sector.empty:
-            df = df.join(sector, how="left", rsuffix="_dup")
-            df = df[[c for c in df.columns if not c.endswith("_dup")]]
-            df = df.ffill()
-    except Exception:
-        pass
+    # Historical sentiment as a time series
+    sentiment_df = get_sentiment_history_df(ticker)
 
-    # Merge Fear & Greed data
-    try:
-        fg = fetch_fear_greed_history(period="1y")
-        if not fg.empty:
-            df = df.join(fg, how="left", rsuffix="_dup")
-            df = df[[c for c in df.columns if not c.endswith("_dup")]]
-            df = df.ffill()
-    except Exception:
-        pass
-
-    # Get current sentiment
-    try:
-        sent = get_ticker_sentiment(ticker)
-        sentiment_score = sent["avg_sentiment"]
-    except Exception:
-        sentiment_score = 0.0
-
-    features = build_features(df, sentiment_score)
+    features = build_features(df, sentiment_df)
 
     # Target: direction of future price movement
     if horizon == "next_day":
@@ -211,17 +204,11 @@ def prepare_dataset(ticker: str, horizon: str = "next_day"):
         target = (df["Close"].shift(-5) > df["Close"]).astype(int)
         pct_target = df["Close"].pct_change(5).shift(-5)
 
-    # Combine and handle NaN
+    # Combine and drop rows with any NaN (indicator warm-up + future target)
     combined = features.copy()
     combined["target"] = target
     combined["pct_target"] = pct_target
-
-    # Fill NaN features with 0 (early rows where indicators haven't warmed up)
-    feature_cols_only = [c for c in combined.columns if c not in ["target", "pct_target"]]
-    combined[feature_cols_only] = combined[feature_cols_only].fillna(0)
-
-    # Only drop rows where target is NaN
-    combined = combined.dropna(subset=["target", "pct_target"])
+    combined = combined.dropna()
 
     if len(combined) < 30:
         return None, None, None
@@ -356,9 +343,10 @@ def get_feature_importance(ticker: str, horizon: str = "next_day", top_n: int = 
         "Technical": ["return_", "sma_", "ema_", "rsi", "macd", "bb_", "stoch_",
                       "atr", "obv", "momentum_", "volume_", "volatility_",
                       "price_vs_"],
-        "Market": ["sp500_", "vix_", "treasury_", "vs_market"],
+        "Market": ["sp500_", "vix_", "treasury_", "vs_market", "usd_",
+                   "yield_curve_"],
         "Sector": ["sector_", "vs_sector"],
-        "Sentiment": ["sentiment"],
+        "Sentiment": ["sentiment", "sentiment_ma5", "sentiment_change"],
         "Fear & Greed": ["fear_greed", "extreme_fear", "extreme_greed"],
         "Seasonality": ["day_of_week", "month"],
     }
@@ -419,40 +407,18 @@ def predict(ticker: str, horizon: str = "next_day") -> dict:
     if df.empty:
         return {"error": "No stock data available"}
 
-    # Merge market + sector data
-    try:
-        market = fetch_market_data(period="6mo")
-        if not market.empty:
-            df = df.join(market, how="left", rsuffix="_dup")
-            df = df[[c for c in df.columns if not c.endswith("_dup")]]
-            df = df.ffill()
-    except Exception:
-        pass
-    try:
-        sector = fetch_sector_data(ticker, period="6mo")
-        if not sector.empty:
-            df = df.join(sector, how="left", rsuffix="_dup")
-            df = df[[c for c in df.columns if not c.endswith("_dup")]]
-            df = df.ffill()
-    except Exception:
-        pass
-    try:
-        fg = fetch_fear_greed_history(period="6mo")
-        if not fg.empty:
-            df = df.join(fg, how="left", rsuffix="_dup")
-            df = df[[c for c in df.columns if not c.endswith("_dup")]]
-            df = df.ffill()
-    except Exception:
-        pass
+    df = _merge_external(df, fetch_market_data, period="6mo")
+    df = _merge_external(df, fetch_sector_data, ticker=ticker, period="6mo")
+    df = _merge_external(df, fetch_fear_greed_history, period="6mo")
 
+    # Fetch fresh sentiment (saves to daily_sentiment table) and get history
     try:
         sent = get_ticker_sentiment(ticker)
-        sentiment_score = sent["avg_sentiment"]
     except Exception:
-        sentiment_score = 0.0
         sent = {}
+    sentiment_df = get_sentiment_history_df(ticker)
 
-    features = build_features(df, sentiment_score)
+    features = build_features(df, sentiment_df)
     features = features.fillna(0)
 
     if features.empty:
@@ -533,8 +499,8 @@ def predict(ticker: str, horizon: str = "next_day") -> dict:
         "consensus": consensus,
         "model_votes": votes,
         "model_details": model_details,
-        "sentiment": sentiment_score,
-        "sentiment_label": sent.get("label", "N/A") if sentiment_score != 0 else "N/A",
+        "sentiment": sent.get("avg_sentiment", 0),
+        "sentiment_label": sent.get("label", "N/A"),
         "model_cv_accuracy": model_accuracy,
         "tracked_accuracy": tracked["accuracy"],
         "tracked_total": tracked["total"],

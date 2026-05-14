@@ -85,6 +85,21 @@ def init_db():
         );
 
         CREATE INDEX IF NOT EXISTS idx_portfolio_status ON portfolio(status);
+
+        CREATE TABLE IF NOT EXISTS daily_sentiment (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker      TEXT NOT NULL,
+            date        TEXT NOT NULL,
+            avg_score   REAL NOT NULL,
+            num_articles INTEGER,
+            positive    INTEGER,
+            negative    INTEGER,
+            neutral     INTEGER,
+            engine      TEXT,
+            UNIQUE(ticker, date)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_daily_sentiment ON daily_sentiment(ticker, date);
     """)
     conn.commit()
     conn.close()
@@ -223,6 +238,38 @@ def get_recent_news(ticker, days=7):
            WHERE ticker=? AND fetched_at >= ?
            ORDER BY fetched_at DESC""",
         (ticker, cutoff)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ── Daily Sentiment ─────────────────────────────────────────────────────────
+
+def save_daily_sentiment(ticker, date_str, avg_score, num_articles=0,
+                         positive=0, negative=0, neutral=0, engine=""):
+    conn = get_conn()
+    try:
+        conn.execute(
+            """INSERT OR REPLACE INTO daily_sentiment
+               (ticker, date, avg_score, num_articles, positive, negative, neutral, engine)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (ticker.upper(), date_str, avg_score, num_articles,
+             positive, negative, neutral, engine)
+        )
+        conn.commit()
+    except Exception:
+        pass
+    conn.close()
+
+
+def get_sentiment_history(ticker, days=500):
+    conn = get_conn()
+    cutoff = (_utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+    rows = conn.execute(
+        """SELECT date, avg_score, num_articles FROM daily_sentiment
+           WHERE ticker=? AND date >= ?
+           ORDER BY date ASC""",
+        (ticker.upper(), cutoff)
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
