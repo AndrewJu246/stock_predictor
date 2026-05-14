@@ -23,7 +23,7 @@ refresh_count = st_autorefresh(interval=5 * 60 * 1000, key="auto_refresh")
 import db
 from data_fetcher import get_watchlist, add_ticker, remove_ticker, fetch_current_price, fetch_stock_data, fetch_fear_greed
 from sentiment import get_ticker_sentiment, get_engine_name
-from predictor import predict, predict_all, resolve_predictions, train_model, get_feature_importance, calibrate_confidence
+from predictor import predict, predict_all, resolve_predictions, train_model, get_feature_importance, calibrate_confidence, detect_current_regime
 from backtester import run_backtest
 from risk_manager import calculate_stop_loss, calculate_position_size, analyze_diversification
 
@@ -134,6 +134,30 @@ with tab_overview:
                 fg_cols[3].metric("3 Months Ago", f"{fg_hist['3m']:.0f}")
             if fg_hist.get("1y"):
                 fg_cols[4].metric("1 Year Ago", f"{fg_hist['1y']:.0f}")
+
+            st.markdown("---")
+    except Exception:
+        pass
+
+    # Market Regime
+    try:
+        regime = detect_current_regime()
+        if regime.get("label") != "Unknown":
+            regime_icons = {"Bull": "🟢", "Sideways": "🟡", "Bear": "🔴"}
+            regime_icon = regime_icons.get(regime["label"], "⚪")
+            details = regime.get("details", {})
+
+            reg_cols = st.columns([1, 1, 1, 1])
+            reg_cols[0].metric("Market Regime", f"{regime_icon} {regime['label']}")
+            if details.get("sp500_vs_200sma_pct") is not None:
+                reg_cols[1].metric("S&P vs 200d SMA", f"{details['sp500_vs_200sma_pct']:+.1f}%")
+            if details.get("vix") is not None:
+                reg_cols[2].metric("VIX", f"{details['vix']:.1f}")
+            if details.get("yield_spread") is not None:
+                reg_cols[3].metric("Yield Spread", f"{details['yield_spread']:.2f}%")
+
+            if regime["label"] == "Bear":
+                st.caption("Bear regime: signal thresholds raised, predictions may be less reliable.")
 
             st.markdown("---")
     except Exception:

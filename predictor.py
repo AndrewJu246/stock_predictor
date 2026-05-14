@@ -182,7 +182,81 @@ def build_features(df: pd.DataFrame, sentiment_df: pd.DataFrame = None) -> pd.Da
     # Month (seasonal patterns)
     feat["month"] = df.index.month
 
+    # Market regime (if enough market data is present)
+    if "sp500_close" in df.columns:
+        regime_df = _compute_regime_series(df)
+        for col in regime_df.columns:
+            feat[col] = regime_df[col]
+
     return feat
+
+
+def _compute_regime_series(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Classify each trading day as bull(2), sideways(1), or bear(0).
+    Uses S&P 500 vs 200d SMA, VIX level, and yield curve.
+    """
+    regime = pd.DataFrame(index=df.index)
+
+    sp500_sma200 = df["sp500_close"].rolling(200, min_periods=50).mean()
+    above_sma200 = (df["sp500_close"] > sp500_sma200).astype(int)
+    regime["sp500_above_200sma"] = above_sma200
+
+    if "vix_close" in df.columns:
+        regime["vix_high"] = (df["vix_close"] > 25).astype(int)
+        regime["vix_extreme"] = (df["vix_close"] > 35).astype(int)
+    else:
+        regime["vix_high"] = 0
+        regime["vix_extreme"] = 0
+
+    yield_inverted = df.get("yield_curve_inverted", pd.Series(0, index=df.index))
+
+    # Regime score: higher = more bullish
+    regime["regime_score"] = (
+        above_sma200 * 2
+        - regime["vix_high"]
+        - regime["vix_extreme"]
+        - yield_inverted
+    )
+
+    # Classify: 2=bull, 1=sideways, 0=bear
+    regime["regime"] = 1  # default sideways
+    regime.loc[regime["regime_score"] >= 2, "regime"] = 2
+    regime.loc[regime["regime_score"] <= -1, "regime"] = 0
+
+    return regime
+
+
+def detect_current_regime() -> dict:
+    """Get the current market regime classification for display."""
+    from data_fetcher import fetch_market_data
+    market = fetch_market_data(period="1y")
+    if market.empty or "sp500_close" not in market.columns:
+        return {"regime": "unknown", "label": "Unknown", "details": {}}
+
+    regime_df = _compute_regime_series(market)
+    latest = regime_df.iloc[-1]
+
+    regime_val = int(latest["regime"])
+    labels = {2: "Bull", 1: "Sideways", 0: "Bear"}
+    label = labels.get(regime_val, "Unknown")
+
+    vix_val = float(market["vix_close"].iloc[-1]) if "vix_close" in market.columns else None
+    sp500_val = float(market["sp500_close"].iloc[-1])
+    sp500_sma200 = float(market["sp500_close"].rolling(200, min_periods=50).mean().iloc[-1])
+    yield_spread = float(market["yield_curve_spread"].iloc[-1]) if "yield_curve_spread" in market.columns else None
+
+    return {
+        "regime": regime_val,
+        "label": label,
+        "details": {
+            "sp500": round(sp500_val, 2),
+            "sp500_200sma": round(sp500_sma200, 2),
+            "sp500_vs_200sma_pct": round((sp500_val / sp500_sma200 - 1) * 100, 1),
+            "vix": round(vix_val, 1) if vix_val else None,
+            "yield_spread": round(yield_spread, 2) if yield_spread is not None else None,
+        },
+    }
 
 
 def _merge_external(df, fetcher, **kwargs):
@@ -429,6 +503,7 @@ def get_feature_importance(ticker: str, horizon: str = "next_day", top_n: int = 
                      "insider_sell_30d", "insider_net_30d", "insider_signal"],
         "Macro (FRED)": ["cpi", "cpi_yoy_change", "cpi_mom_change", "unemployment",
                           "unemployment_change", "fed_funds", "fed_funds_change"],
+        "Regime": ["regime", "regime_score", "sp500_above_200sma", "vix_high", "vix_extreme"],
         "Seasonality": ["day_of_week", "month"],
     }
 
@@ -575,6 +650,8 @@ def predict(ticker: str, horizon: str = "next_day") -> dict:
     if not db.has_recent_prediction(ticker, horizon, minutes=10):
         db.save_prediction(ticker, horizon, direction, confidence)
 
+    regime = detect_current_regime()
+
     return {
         "ticker": ticker,
         "horizon": horizon,
@@ -588,7 +665,8 @@ def predict(ticker: str, horizon: str = "next_day") -> dict:
         "model_cv_accuracy": model_accuracy,
         "tracked_accuracy": tracked["accuracy"],
         "tracked_total": tracked["total"],
-        "signal": _get_signal(direction, confidence, ticker),
+        "signal": _get_signal(direction, confidence, ticker, regime.get("regime")),
+        "market_regime": regime,
     }
 
 
@@ -663,8 +741,10 @@ _calibration_cache = {}
 _CALIBRATION_TTL = 3600
 
 
-def _get_signal(direction: str, confidence: float, ticker: str = None) -> str:
-    """Convert prediction to a trading signal label using calibrated thresholds."""
+def _get_signal(direction: str, confidence: float, ticker: str = None,
+                regime: int = None) -> str:
+    """Convert prediction to a trading signal label using calibrated thresholds.
+    Regime-aware: bear markets widen the hold zone, bull markets narrow it."""
     strong = 0.7
     normal = 0.55
 
@@ -680,6 +760,14 @@ def _get_signal(direction: str, confidence: float, ticker: str = None) -> str:
         if cal.get("calibrated"):
             strong = cal["thresholds"]["strong"]
             normal = cal["thresholds"]["normal"]
+
+    # Regime adjustment: bear markets require higher confidence for signals
+    if regime == 0:  # Bear
+        strong = min(strong + 0.05, 0.85)
+        normal = min(normal + 0.05, 0.75)
+    elif regime == 2:  # Bull
+        strong = max(strong - 0.03, 0.60)
+        normal = max(normal - 0.03, 0.50)
 
     if confidence >= strong:
         return f"Strong {'Buy' if direction == 'up' else 'Sell'}"
