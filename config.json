@@ -13,14 +13,9 @@
       "hold_low": 0.45,
       "sell": 0.3
     },
-    "hf_token": "",
     "email": {
-      "enabled": true,
       "smtp_server": "smtp.gmail.com",
-      "smtp_port": 587,
-      "from_address": "your_email@gmail.com",
-      "password": "gmail_password_key",
-      "to_address": "your_email@gmail.com"
+      "smtp_port": 587
     }
   }
 }

@@ -4,11 +4,15 @@ Primary: FinBERT via HuggingFace Inference API (free, no local torch needed).
 Fallback: VADER with finance lexicon.
 """
 
+import os
 import requests
 import time
+from dotenv import load_dotenv
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from data_fetcher import fetch_news
 import db
+
+load_dotenv()
 
 # ── HuggingFace Inference API (2026 router) ──────────────────────────────────
 
@@ -23,27 +27,13 @@ HF_HEADERS = {}
 
 HAS_FINBERT = False
 HF_API_URL = None
+_finbert_checked = False
 
 
 def _load_hf_token():
-    """Load HF token from env var (Railway) or config.json (local)."""
+    """Load HF token from .env or environment variable."""
     global HF_HEADERS
-    import os
-
-    # Check env var first (Railway deployment)
     token = os.environ.get("HF_TOKEN", "")
-
-    # Fall back to config.json
-    if not token:
-        try:
-            import json
-            from pathlib import Path
-            cfg_path = Path(__file__).parent / "config.json"
-            with open(cfg_path) as f:
-                cfg = json.load(f)
-            token = cfg.get("settings", {}).get("hf_token", "")
-        except Exception:
-            pass
 
     if token:
         HF_HEADERS["Authorization"] = f"Bearer {token}"
@@ -96,8 +86,11 @@ def _check_finbert_api():
     print("[WARN] No financial sentiment API available. Using VADER fallback.")
 
 
-# Test on import
-_check_finbert_api()
+def _ensure_finbert_checked():
+    global _finbert_checked
+    if not _finbert_checked:
+        _check_finbert_api()
+        _finbert_checked = True
 
 
 def _finbert_analyze(texts: list) -> list:
@@ -170,6 +163,7 @@ def analyze_headline(headline: str) -> float:
     if not headline or not headline.strip():
         return 0.0
 
+    _ensure_finbert_checked()
     if HAS_FINBERT:
         scores = _finbert_analyze([headline])
         if scores and scores[0] is not None:
@@ -183,6 +177,7 @@ def analyze_news_batch(articles: list) -> list:
     """Analyze sentiment for a list of article dicts. Adds 'sentiment' key."""
     headlines = [a.get("title", "") for a in articles]
 
+    _ensure_finbert_checked()
     if HAS_FINBERT and headlines:
         # Batch call — HF API handles batches efficiently
         scores = _finbert_analyze(headlines)
@@ -253,4 +248,5 @@ def _sentiment_label(score: float) -> str:
 
 def get_engine_name() -> str:
     """Return which sentiment engine is active."""
+    _ensure_finbert_checked()
     return "FinBERT (API)" if HAS_FINBERT else "VADER"

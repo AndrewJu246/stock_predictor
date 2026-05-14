@@ -4,8 +4,12 @@ db.py — SQLite storage for predictions, accuracy tracking, and model metadata.
 
 import sqlite3
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+
+def _utcnow():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 DB_PATH = Path(__file__).parent / "data" / "predictor.db"
 
@@ -94,7 +98,7 @@ def save_prediction(ticker, horizon, direction, confidence, pct_change=None):
         """INSERT INTO predictions (ticker, created_at, horizon, pred_direction,
            pred_confidence, pred_pct_change)
            VALUES (?, ?, ?, ?, ?, ?)""",
-        (ticker, datetime.utcnow().isoformat(), horizon, direction,
+        (ticker, _utcnow().isoformat(), horizon, direction,
          confidence, pct_change)
     )
     conn.commit()
@@ -125,7 +129,7 @@ def resolve_prediction(pred_id, actual_direction, actual_pct_change):
         """UPDATE predictions
            SET actual_direction=?, actual_pct_change=?, resolved_at=?, correct=?
            WHERE id=?""",
-        (actual_direction, actual_pct_change, datetime.utcnow().isoformat(),
+        (actual_direction, actual_pct_change, _utcnow().isoformat(),
          correct, pred_id)
     )
     conn.commit()
@@ -171,7 +175,7 @@ def save_model_meta(ticker, horizon, sample_size, accuracy, features):
     conn.execute(
         """INSERT INTO model_meta (ticker, horizon, trained_at, sample_size,
            accuracy, features) VALUES (?, ?, ?, ?, ?, ?)""",
-        (ticker, horizon, datetime.utcnow().isoformat(), sample_size,
+        (ticker, horizon, _utcnow().isoformat(), sample_size,
          accuracy, json.dumps(features))
     )
     conn.commit()
@@ -195,7 +199,7 @@ def get_latest_model_meta(ticker, horizon):
 def cache_news(ticker, articles):
     """articles: list of dicts with title, source, sentiment, url"""
     conn = get_conn()
-    now = datetime.utcnow().isoformat()
+    now = _utcnow().isoformat()
     for a in articles:
         try:
             conn.execute(
@@ -213,7 +217,7 @@ def cache_news(ticker, articles):
 
 def get_recent_news(ticker, days=7):
     conn = get_conn()
-    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    cutoff = (_utcnow() - timedelta(days=days)).isoformat()
     rows = conn.execute(
         """SELECT * FROM news_cache
            WHERE ticker=? AND fetched_at >= ?
@@ -231,7 +235,7 @@ init_db()
 def has_recent_prediction(ticker, horizon, minutes=10):
     """Check if a prediction was already made within the last N minutes."""
     conn = get_conn()
-    cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
+    cutoff = (_utcnow() - timedelta(minutes=minutes)).isoformat()
     row = conn.execute(
         """SELECT COUNT(*) as cnt FROM predictions
            WHERE ticker=? AND horizon=? AND created_at >= ?""",
@@ -246,7 +250,7 @@ def has_recent_prediction(ticker, horizon, minutes=10):
 def add_position(ticker, shares, buy_price, buy_date=None, notes=""):
     conn = get_conn()
     if buy_date is None:
-        buy_date = datetime.utcnow().strftime("%Y-%m-%d")
+        buy_date = _utcnow().strftime("%Y-%m-%d")
     conn.execute(
         """INSERT INTO portfolio (ticker, shares, buy_price, buy_date, status, notes)
            VALUES (?, ?, ?, ?, 'open', ?)""",
@@ -259,7 +263,7 @@ def add_position(ticker, shares, buy_price, buy_date=None, notes=""):
 def close_position(position_id, sell_price, sell_date=None):
     conn = get_conn()
     if sell_date is None:
-        sell_date = datetime.utcnow().strftime("%Y-%m-%d")
+        sell_date = _utcnow().strftime("%Y-%m-%d")
     conn.execute(
         """UPDATE portfolio SET sell_price=?, sell_date=?, status='closed'
            WHERE id=?""",
@@ -307,7 +311,7 @@ def save_portfolio_snapshot(total_value, total_cost, total_pnl, pnl_pct):
     """Save snapshot, but only if the last one is >1 hour old."""
     conn = get_conn()
     # Check if we already have a recent snapshot
-    cutoff = (datetime.utcnow() - timedelta(hours=1)).isoformat()
+    cutoff = (_utcnow() - timedelta(hours=1)).isoformat()
     recent = conn.execute(
         "SELECT COUNT(*) as cnt FROM portfolio_snapshots WHERE snapshot_at >= ?",
         (cutoff,)
@@ -319,7 +323,7 @@ def save_portfolio_snapshot(total_value, total_cost, total_pnl, pnl_pct):
     conn.execute(
         """INSERT INTO portfolio_snapshots (snapshot_at, total_value, total_cost,
            total_pnl, pnl_pct) VALUES (?, ?, ?, ?, ?)""",
-        (datetime.utcnow().isoformat(), total_value, total_cost, total_pnl, pnl_pct)
+        (_utcnow().isoformat(), total_value, total_cost, total_pnl, pnl_pct)
     )
     conn.commit()
     conn.close()

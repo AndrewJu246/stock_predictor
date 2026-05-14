@@ -17,7 +17,7 @@ try:
 except ImportError:
     HAS_XGBOOST = False
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import db
 from data_fetcher import fetch_stock_data, fetch_market_data, fetch_sector_data, fetch_fear_greed_history
@@ -585,7 +585,7 @@ def resolve_predictions():
         else:  # weekly
             check_after = created + timedelta(days=5)
 
-        if datetime.utcnow() < check_after:
+        if datetime.now(timezone.utc).replace(tzinfo=None) < check_after:
             continue  # Not enough time has passed
 
         # Fetch actual price data

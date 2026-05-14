@@ -3,35 +3,34 @@ notifier.py — Email notifications for strong signals and daily summaries.
 Uses Gmail SMTP (free, no third-party service needed).
 """
 
+import os
 import smtplib
 import json
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
 
 
 def _get_email_config():
-    """Load email settings from env vars (Railway) or config.json (local)."""
-    import os
-
-    # Check env vars first (Railway deployment)
-    if os.environ.get("EMAIL_ENABLED", "").lower() == "true":
-        return {
-            "enabled": True,
-            "smtp_server": os.environ.get("EMAIL_SMTP_SERVER", "smtp.gmail.com"),
-            "smtp_port": int(os.environ.get("EMAIL_SMTP_PORT", "587")),
-            "from_address": os.environ.get("EMAIL_FROM", ""),
-            "password": os.environ.get("EMAIL_PASSWORD", ""),
-            "to_address": os.environ.get("EMAIL_TO", ""),
-        }
-
-    # Fall back to config.json
+    """Load email settings from .env (secrets) + config.json (non-secrets)."""
     with open(CONFIG_PATH) as f:
         cfg = json.load(f)
-    return cfg.get("settings", {}).get("email", {})
+    file_cfg = cfg.get("settings", {}).get("email", {})
+
+    return {
+        "enabled": os.environ.get("EMAIL_ENABLED", "false").lower() == "true",
+        "smtp_server": file_cfg.get("smtp_server", "smtp.gmail.com"),
+        "smtp_port": int(file_cfg.get("smtp_port", 587)),
+        "from_address": os.environ.get("EMAIL_FROM", ""),
+        "password": os.environ.get("EMAIL_PASSWORD", ""),
+        "to_address": os.environ.get("EMAIL_TO", ""),
+    }
 
 
 def _send_email(subject: str, body_html: str):

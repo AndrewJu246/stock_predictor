@@ -8,6 +8,11 @@ import numpy as np
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 from datetime import datetime
+try:
+    from xgboost import XGBClassifier
+    HAS_XGBOOST = True
+except ImportError:
+    HAS_XGBOOST = False
 
 from data_fetcher import fetch_stock_data, fetch_market_data, fetch_fear_greed_history
 from predictor import build_features
@@ -100,6 +105,12 @@ def run_backtest(ticker: str, horizon: str = "next_day",
             random_state=42, n_jobs=-1,
         ),
     }
+    if HAS_XGBOOST:
+        bt_models["XGBoost"] = XGBClassifier(
+            n_estimators=50, max_depth=3, learning_rate=0.1,
+            subsample=0.8, colsample_bytree=0.8,
+            random_state=42, eval_metric="logloss", verbosity=0,
+        )
 
     for i in range(start_idx, end_idx, test_step):
         step_count += 1
