@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import ta
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.feature_selection import VarianceThreshold, mutual_info_classif
 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.preprocessing import StandardScaler
 try:
@@ -231,6 +232,57 @@ def prepare_dataset(ticker: str, horizon: str = "next_day"):
     return X, y, combined
 
 
+MAX_FEATURES = 30
+
+
+def select_features(X: pd.DataFrame, y: pd.Series, max_features: int = MAX_FEATURES) -> tuple:
+    """
+    Two-stage feature selection:
+    1. Drop near-zero variance features
+    2. Rank by mutual information, keep top max_features
+    Returns (X_selected, selected_columns, selection_info).
+    """
+    original_count = X.shape[1]
+
+    # Stage 1: variance filter — drop constant or near-constant columns
+    vt = VarianceThreshold(threshold=1e-6)
+    try:
+        vt.fit(X.fillna(0))
+        kept_mask = vt.get_support()
+        X_var = X.loc[:, kept_mask]
+    except Exception:
+        X_var = X
+
+    dropped_variance = original_count - X_var.shape[1]
+
+    # Stage 2: mutual information ranking
+    if X_var.shape[1] <= max_features:
+        return X_var, list(X_var.columns), {
+            "original": original_count,
+            "after_variance_filter": X_var.shape[1],
+            "dropped_low_variance": dropped_variance,
+            "final": X_var.shape[1],
+            "method": "variance_filter_only",
+        }
+
+    try:
+        mi_scores = mutual_info_classif(X_var.fillna(0), y, random_state=42, n_neighbors=5)
+        mi_series = pd.Series(mi_scores, index=X_var.columns).sort_values(ascending=False)
+        top_features = mi_series.head(max_features).index.tolist()
+        X_selected = X_var[top_features]
+    except Exception:
+        X_selected = X_var.iloc[:, :max_features]
+        top_features = list(X_selected.columns)
+
+    return X_selected, top_features, {
+        "original": original_count,
+        "after_variance_filter": X_var.shape[1],
+        "dropped_low_variance": dropped_variance,
+        "final": len(top_features),
+        "method": "variance_filter + mutual_information",
+    }
+
+
 # ── Model training ───────────────────────────────────────────────────────────
 
 def train_model(ticker: str, horizon: str = "next_day") -> dict:
@@ -239,6 +291,9 @@ def train_model(ticker: str, horizon: str = "next_day") -> dict:
 
     if X is None:
         return {"error": f"Not enough data for {ticker}"}
+
+    # Feature selection — prune noise before training
+    X, selected_features, selection_info = select_features(X, y)
 
     # Scale features
     scaler = StandardScaler()
@@ -290,6 +345,7 @@ def train_model(ticker: str, horizon: str = "next_day") -> dict:
         "sample_size": len(X),
         "num_models": len(trained),
         "features": list(X.columns),
+        "feature_selection": selection_info,
     }
 
 
