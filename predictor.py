@@ -510,7 +510,7 @@ def predict(ticker: str, horizon: str = "next_day") -> dict:
         "model_cv_accuracy": model_accuracy,
         "tracked_accuracy": tracked["accuracy"],
         "tracked_total": tracked["total"],
-        "signal": _get_signal(direction, confidence),
+        "signal": _get_signal(direction, confidence, ticker),
     }
 
 
@@ -526,11 +526,86 @@ def predict_all(horizon: str = "next_day") -> list:
     return results
 
 
-def _get_signal(direction: str, confidence: float) -> str:
-    """Convert prediction to a trading signal label."""
-    if confidence >= 0.7:
+def calibrate_confidence(ticker: str = None, min_samples: int = 20) -> dict:
+    """
+    Analyze resolved predictions to measure actual accuracy per confidence bin.
+    Returns calibration data and recommended signal thresholds.
+    """
+    stats = db.get_accuracy_stats(ticker=ticker)
+    preds = stats.get("predictions", [])
+
+    if len(preds) < min_samples:
+        return {
+            "calibrated": False,
+            "reason": f"Need {min_samples}+ resolved predictions, have {len(preds)}",
+            "thresholds": {"strong": 0.7, "normal": 0.55},
+        }
+
+    bins = [(50, 55), (55, 60), (60, 65), (65, 70), (70, 75), (75, 80), (80, 100)]
+    calibration = []
+
+    for low, high in bins:
+        in_bin = [p for p in preds
+                  if low <= p["pred_confidence"] * 100 < high]
+        if not in_bin:
+            continue
+        correct = sum(1 for p in in_bin if p["correct"] == 1)
+        acc = correct / len(in_bin)
+        calibration.append({
+            "bin": f"{low}-{high}%",
+            "count": len(in_bin),
+            "accuracy": round(acc * 100, 1),
+            "reported_confidence": round((low + high) / 2, 1),
+        })
+
+    strong_threshold = 0.7
+    normal_threshold = 0.55
+
+    for entry in calibration:
+        if entry["accuracy"] >= 65 and entry["count"] >= 5:
+            candidate = entry["bin"].split("-")[0]
+            normal_threshold = min(normal_threshold, int(candidate) / 100)
+        if entry["accuracy"] >= 75 and entry["count"] >= 5:
+            candidate = entry["bin"].split("-")[0]
+            strong_threshold = min(strong_threshold, int(candidate) / 100)
+
+    return {
+        "calibrated": True,
+        "bins": calibration,
+        "total_predictions": len(preds),
+        "overall_accuracy": stats["accuracy"],
+        "thresholds": {
+            "strong": round(strong_threshold, 2),
+            "normal": round(normal_threshold, 2),
+        },
+    }
+
+
+_calibration_cache = {}
+_CALIBRATION_TTL = 3600
+
+
+def _get_signal(direction: str, confidence: float, ticker: str = None) -> str:
+    """Convert prediction to a trading signal label using calibrated thresholds."""
+    strong = 0.7
+    normal = 0.55
+
+    if ticker:
+        now = datetime.now()
+        if (ticker in _calibration_cache and
+                (now - _calibration_cache[ticker][1]).total_seconds() < _CALIBRATION_TTL):
+            cal = _calibration_cache[ticker][0]
+        else:
+            cal = calibrate_confidence(ticker)
+            _calibration_cache[ticker] = (cal, now)
+
+        if cal.get("calibrated"):
+            strong = cal["thresholds"]["strong"]
+            normal = cal["thresholds"]["normal"]
+
+    if confidence >= strong:
         return f"Strong {'Buy' if direction == 'up' else 'Sell'}"
-    elif confidence >= 0.55:
+    elif confidence >= normal:
         return f"{'Buy' if direction == 'up' else 'Sell'}"
     else:
         return "Hold"

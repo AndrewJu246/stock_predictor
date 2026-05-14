@@ -23,7 +23,7 @@ refresh_count = st_autorefresh(interval=5 * 60 * 1000, key="auto_refresh")
 import db
 from data_fetcher import get_watchlist, add_ticker, remove_ticker, fetch_current_price, fetch_stock_data, fetch_fear_greed
 from sentiment import get_ticker_sentiment, get_engine_name
-from predictor import predict, predict_all, resolve_predictions, train_model, get_feature_importance
+from predictor import predict, predict_all, resolve_predictions, train_model, get_feature_importance, calibrate_confidence
 from backtester import run_backtest
 from risk_manager import calculate_stop_loss, calculate_position_size, analyze_diversification
 
@@ -781,6 +781,57 @@ with tab_features:
             feat_df.index = range(1, len(feat_df) + 1)
             feat_df.index.name = "Rank"
             st.dataframe(feat_df, width="stretch")
+
+    # ── Confidence Calibration ─────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("Confidence Calibration")
+    cal = calibrate_confidence(ticker=fi_ticker)
+
+    if not cal.get("calibrated"):
+        st.info(cal.get("reason", "Not enough data for calibration."))
+    else:
+        cal_c1, cal_c2 = st.columns(2)
+        cal_c1.metric("Strong Signal Threshold", f"{cal['thresholds']['strong']*100:.0f}%")
+        cal_c2.metric("Normal Signal Threshold", f"{cal['thresholds']['normal']*100:.0f}%")
+
+        if cal.get("bins"):
+            cal_df = pd.DataFrame(cal["bins"])
+            cal_df = cal_df.rename(columns={
+                "bin": "Confidence Bin",
+                "count": "Predictions",
+                "accuracy": "Actual Accuracy %",
+                "reported_confidence": "Reported Confidence %",
+            })
+            st.dataframe(cal_df, hide_index=True, use_container_width=True)
+
+            bins_data = cal["bins"]
+            fig_cal = go.Figure()
+            fig_cal.add_trace(go.Bar(
+                x=[b["bin"] for b in bins_data],
+                y=[b["accuracy"] for b in bins_data],
+                name="Actual Accuracy",
+                marker_color="#4CAF50",
+                text=[f"{b['accuracy']}%" for b in bins_data],
+                textposition="outside",
+            ))
+            fig_cal.add_trace(go.Scatter(
+                x=[b["bin"] for b in bins_data],
+                y=[b["reported_confidence"] for b in bins_data],
+                name="Reported Confidence",
+                mode="lines+markers",
+                line=dict(color="#FF9800", dash="dash"),
+            ))
+            fig_cal.update_layout(
+                yaxis_title="Accuracy / Confidence %",
+                xaxis_title="Confidence Bin",
+                template="plotly_dark",
+                height=350,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            )
+            st.plotly_chart(fig_cal, use_container_width=True)
+
+        st.caption(f"Based on {cal['total_predictions']} resolved predictions. "
+                   f"Overall accuracy: {cal['overall_accuracy']}%")
 
 
 # ── Footer ───────────────────────────────────────────────────────────────────
