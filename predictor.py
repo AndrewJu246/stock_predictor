@@ -401,7 +401,6 @@ def train_model(ticker: str, horizon: str = "next_day") -> dict:
     # Class balance: compensate for bull-market bias in training data
     n_pos = int(y.sum())
     n_neg = len(y) - n_pos
-    scale_pos_weight = n_neg / n_pos if n_pos > 0 else 1.0
     class_balance = np.where(y.values == 1,
                              len(y) / (2 * max(n_pos, 1)),
                              len(y) / (2 * max(n_neg, 1)))
@@ -452,10 +451,14 @@ def train_model(ticker: str, horizon: str = "next_day") -> dict:
 
             # Calibrate probabilities via Platt scaling on held-out tail
             cal_n = max(20, len(X_scaled) // 5)
-            calibrated = CalibratedClassifierCV(model, cv="prefit", method="sigmoid")
-            calibrated.fit(X_scaled[-cal_n:], y.iloc[-cal_n:],
-                           sample_weight=mag_weights[-cal_n:])
-            trained[name] = calibrated
+            cal_y = y.iloc[-cal_n:]
+            if cal_y.nunique() >= 2:
+                calibrated = CalibratedClassifierCV(model, cv="prefit", method="sigmoid")
+                calibrated.fit(X_scaled[-cal_n:], cal_y,
+                               sample_weight=mag_weights[-cal_n:])
+                trained[name] = calibrated
+            else:
+                trained[name] = model
             cv_results[name] = {
                 "accuracy": round(np.mean(fold_scores) * 100, 1),
                 "std": round(np.std(fold_scores) * 100, 1),

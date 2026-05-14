@@ -590,8 +590,8 @@ def fetch_fred_data(period: str = "2y") -> pd.DataFrame:
 
     # Derived features
     if "cpi" in result.columns:
-        result["cpi_yoy_change"] = result["cpi"].pct_change(12)
-        result["cpi_mom_change"] = result["cpi"].pct_change(1)
+        result["cpi_yoy_change"] = result["cpi"].pct_change(365)
+        result["cpi_mom_change"] = result["cpi"].pct_change(30)
     if "fed_funds" in result.columns:
         result["fed_funds_change"] = result["fed_funds"].diff()
     if "unemployment" in result.columns:
