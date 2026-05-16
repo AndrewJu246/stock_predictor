@@ -449,15 +449,14 @@ def train_model(ticker: str, horizon: str = "next_day") -> dict:
             # Fit final model on full selected+scaled data
             model.fit(X_scaled, y, sample_weight=mag_weights)
 
-            # Calibrate probabilities via Platt scaling on held-out tail
-            cal_n = max(20, len(X_scaled) // 5)
-            cal_y = y.iloc[-cal_n:]
-            if cal_y.nunique() >= 2:
-                calibrated = CalibratedClassifierCV(model, cv="prefit", method="sigmoid")
-                calibrated.fit(X_scaled[-cal_n:], cal_y,
-                               sample_weight=mag_weights[-cal_n:])
+            # Calibrate probabilities via Platt scaling (TimeSeriesSplit CV)
+            try:
+                calibrated = CalibratedClassifierCV(
+                    clone(model), cv=TimeSeriesSplit(n_splits=3), method="sigmoid"
+                )
+                calibrated.fit(X_scaled, y, sample_weight=mag_weights)
                 trained[name] = calibrated
-            else:
+            except Exception:
                 trained[name] = model
             cv_results[name] = {
                 "accuracy": round(np.mean(fold_scores) * 100, 1),
