@@ -1,5 +1,16 @@
 {
-  "watchlist": ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA"],
+  "watchlist": [
+    "AAPL",
+    "MSFT",
+    "GOOGL",
+    "AMZN",
+    "TSLA",
+    "INTC",
+    "SNDK",
+    "LITE",
+    "MU",
+    "NVDA"
+  ],
   "settings": {
     "lookback_days": 180,
     "retrain_interval_hours": 24,
