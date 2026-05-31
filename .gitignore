@@ -5,3 +5,6 @@ data/
 .DS_Store
 *.pkl
 .env
+.claude/worktrees/gifted-haibt-c56c37/
+.claude/worktrees/keen-euclid-77f621/
+.claude/worktrees/lucid-kare-63b0ba/
