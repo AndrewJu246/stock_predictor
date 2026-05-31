@@ -319,6 +319,9 @@ def prepare_dataset(ticker: str, horizon: str = "next_day"):
     combined = features.copy()
     combined["target"] = target
     combined["pct_target"] = pct_target
+    # Drop columns that are entirely NaN (e.g. missing fundamentals for some tickers)
+    # before row-wise dropna, otherwise one bad column wipes all rows
+    combined = combined.dropna(axis=1, how="all")
     combined = combined.dropna()
 
     # Filter out "flat" days where the move is within noise range
@@ -390,13 +393,14 @@ def train_model(ticker: str, horizon: str = "next_day") -> dict:
     """Train a 3-model ensemble for the given ticker and horizon."""
     X_raw, y, combined = prepare_dataset(ticker, horizon)
 
-    if X_raw is None:
+    if X_raw is None or len(X_raw) == 0:
         return {"error": f"Not enough data for {ticker}"}
 
     # Magnitude + class-balance weighted training
     mag_weights = combined.loc[X_raw.index, "pct_target"].abs()
     mag_weights = mag_weights.clip(upper=mag_weights.quantile(0.95))
-    mag_weights = (mag_weights / mag_weights.mean()).values
+    mean_mag = mag_weights.mean()
+    mag_weights = (mag_weights / mean_mag).values if mean_mag > 0 else np.ones(len(mag_weights))
 
     # Class balance: compensate for bull-market bias in training data
     n_pos = int(y.sum())
@@ -405,7 +409,8 @@ def train_model(ticker: str, horizon: str = "next_day") -> dict:
                              len(y) / (2 * max(n_pos, 1)),
                              len(y) / (2 * max(n_neg, 1)))
     mag_weights = mag_weights * class_balance
-    mag_weights = mag_weights / mag_weights.mean()
+    mean_combined = mag_weights.mean()
+    mag_weights = mag_weights / mean_combined if mean_combined > 0 else mag_weights
 
     # Feature selection on full training set for the final model
     X, selected_features, selection_info = select_features(X_raw, y)
@@ -450,11 +455,13 @@ def train_model(ticker: str, horizon: str = "next_day") -> dict:
             model.fit(X_scaled, y, sample_weight=mag_weights)
 
             # Calibrate probabilities via Platt scaling (TimeSeriesSplit CV)
+            # Do NOT pass sample_weight — calibration must reflect raw accuracy,
+            # not magnitude-weighted accuracy, or it produces overconfident outputs.
             try:
                 calibrated = CalibratedClassifierCV(
                     clone(model), cv=TimeSeriesSplit(n_splits=3), method="sigmoid"
                 )
-                calibrated.fit(X_scaled, y, sample_weight=mag_weights)
+                calibrated.fit(X_scaled, y)
                 trained[name] = calibrated
             except Exception:
                 trained[name] = model
@@ -710,6 +717,7 @@ def predict(ticker: str, horizon: str = "next_day") -> dict:
 
     direction = "up" if up_score > 0.5 else "down"
     confidence = up_score if direction == "up" else 1 - up_score
+    confidence = min(confidence, 0.85)
 
     # Consensus info
     up_votes = sum(1 for v in votes if v["direction"] == "up")
@@ -724,7 +732,9 @@ def predict(ticker: str, horizon: str = "next_day") -> dict:
     tracked = db.get_accuracy_stats(ticker, horizon, last_n=50)
 
     # Save prediction for future tracking (skip if one was made recently)
-    if not db.has_recent_prediction(ticker, horizon, minutes=10):
+    # Weekly predictions: 1 per day max (they all resolve to the same outcome)
+    dedup_minutes = 1380 if horizon == "weekly" else 10
+    if not db.has_recent_prediction(ticker, horizon, minutes=dedup_minutes):
         db.save_prediction(ticker, horizon, direction, confidence)
 
     regime = detect_current_regime()

@@ -152,10 +152,12 @@ def resolve_prediction(pred_id, actual_direction, actual_pct_change):
     return correct
 
 
-def get_accuracy_stats(ticker=None, horizon=None, last_n=None):
+def get_accuracy_stats(ticker=None, horizon=None, last_n=None, include_pre_fix=False):
     conn = get_conn()
     q = "SELECT * FROM predictions WHERE resolved_at IS NOT NULL"
     params = []
+    if not include_pre_fix:
+        q += " AND COALESCE(pre_fix, 0) = 0"
     if ticker:
         q += " AND ticker = ?"
         params.append(ticker)
