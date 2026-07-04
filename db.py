@@ -101,6 +101,13 @@ def init_db():
 
         CREATE INDEX IF NOT EXISTS idx_daily_sentiment ON daily_sentiment(ticker, date);
     """)
+
+    # Migration: pre_fix flag (2026-06-01 calibration fix) — the production DB
+    # got this via manual ALTER; fresh DBs need it too or get_accuracy_stats fails
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(predictions)")}
+    if "pre_fix" not in existing:
+        conn.execute("ALTER TABLE predictions ADD COLUMN pre_fix INTEGER DEFAULT 0")
+
     conn.commit()
     conn.close()
 

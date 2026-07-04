@@ -23,7 +23,7 @@ refresh_count = st_autorefresh(interval=5 * 60 * 1000, key="auto_refresh")
 import db
 from data_fetcher import get_watchlist, add_ticker, remove_ticker, fetch_current_price, fetch_stock_data, fetch_fear_greed
 from sentiment import get_ticker_sentiment, get_engine_name
-from predictor import predict, predict_all, resolve_predictions, train_model, get_feature_importance, calibrate_confidence, detect_current_regime
+from predictor import predict, predict_all, resolve_predictions, train_model, train_pooled_model, _use_pooled, get_feature_importance, calibrate_confidence, detect_current_regime
 from backtester import run_backtest
 from risk_manager import calculate_stop_loss, calculate_position_size, analyze_diversification
 
@@ -75,12 +75,19 @@ if st.sidebar.button("🔄 Resolve Past Predictions", width="stretch"):
 
 if st.sidebar.button("🧠 Retrain All Models", width="stretch"):
     with st.spinner("Retraining models..."):
-        for t in watchlist:
+        if _use_pooled():
             for h in ["next_day", "weekly"]:
                 try:
-                    train_model(t, h)
+                    train_pooled_model(h)
                 except Exception:
                     pass
+        else:
+            for t in watchlist:
+                for h in ["next_day", "weekly"]:
+                    try:
+                        train_model(t, h)
+                    except Exception:
+                        pass
     st.sidebar.success("Models retrained!")
 
 

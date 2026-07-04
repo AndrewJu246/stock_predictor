@@ -26,7 +26,7 @@ import db
 from data_fetcher import (fetch_stock_data, fetch_market_data, fetch_sector_data,
                           fetch_fear_greed_history, fetch_earnings_history,
                           fetch_insider_transactions, fetch_fred_data,
-                          fetch_fundamentals)
+                          fetch_fundamentals, load_config)
 from sentiment import get_ticker_sentiment, get_sentiment_history_df
 
 MODELS_DIR = Path(__file__).parent / "data" / "models"
@@ -37,13 +37,15 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 def _get_models():
     """Return dict of named models for the ensemble.
     Class balance is handled uniformly via sample_weight in train_model()."""
+    # Daily direction is barely above coin-flip signal-to-noise: leaf-size /
+    # child-weight floors keep the trees from memorizing individual days
     models = {
         "GradientBoosting": GradientBoostingClassifier(
             n_estimators=100, max_depth=4, learning_rate=0.1,
-            subsample=0.8, random_state=42,
+            subsample=0.8, min_samples_leaf=20, random_state=42,
         ),
         "RandomForest": RandomForestClassifier(
-            n_estimators=150, max_depth=6, min_samples_leaf=5,
+            n_estimators=150, max_depth=6, min_samples_leaf=20,
             random_state=42, n_jobs=-1,
         ),
     }
@@ -51,6 +53,7 @@ def _get_models():
         models["XGBoost"] = XGBClassifier(
             n_estimators=100, max_depth=4, learning_rate=0.1,
             subsample=0.8, colsample_bytree=0.8,
+            min_child_weight=5, reg_lambda=2.0,
             random_state=42, eval_metric="logloss",
             verbosity=0,
         )
@@ -101,6 +104,7 @@ def build_features(df: pd.DataFrame, sentiment_df: pd.DataFrame = None) -> pd.Da
     feat["macd_signal"] = macd.macd_signal()
     feat["macd_diff"] = macd.macd_diff()
     feat["macd_cross"] = (feat["macd"] > feat["macd_signal"]).astype(int)
+    feat["macd_diff_pct"] = feat["macd_diff"] / df["Close"]  # scale-free for pooling
 
     # Bollinger Bands
     bb = ta.volatility.BollingerBands(df["Close"], window=20)
@@ -122,6 +126,7 @@ def build_features(df: pd.DataFrame, sentiment_df: pd.DataFrame = None) -> pd.Da
     # ATR
     feat["atr"] = ta.volatility.average_true_range(df["High"], df["Low"],
                                                      df["Close"], window=14)
+    feat["atr_pct"] = feat["atr"] / df["Close"]  # scale-free for pooling
 
     # On-Balance Volume
     feat["obv"] = ta.volume.on_balance_volume(df["Close"], df["Volume"])
@@ -272,6 +277,81 @@ def detect_current_regime() -> dict:
     }
 
 
+# Training history window. Longer = more samples per feature, the cheapest
+# anti-overfitting lever. Sources that don't reach back this far (Fear &
+# Greed caps at ~2y) are neutral-filled below rather than dropping rows.
+TRAIN_PERIOD = "5y"
+
+# Neutral values for sparse external columns whose history is shorter than
+# the price data — used instead of letting dropna() discard those rows
+_SPARSE_NEUTRAL = {
+    "fear_greed": 50.0,
+    "fear_greed_ma5": 50.0,
+    "fear_greed_change": 0.0,
+    "extreme_fear": 0,
+    "extreme_greed": 0,
+}
+
+
+# model_meta key for pooled bundles — no db schema change needed
+POOLED_TICKER = "__POOLED__"
+
+# Scale-free features eligible for the pooled cross-sectional model. Raw
+# price/share-scale columns (sma levels, macd, atr, obv, insider share
+# counts, fundamentals snapshots) are excluded: they differ by ticker scale
+# or fingerprint the ticker outright. See spec: specs/completed/.
+POOLED_FEATURES = [
+    # returns & momentum
+    "return_1d", "return_5d", "return_10d", "return_20d", "momentum_10", "momentum_20",
+    # trend ratios / binaries
+    "price_vs_sma10", "price_vs_sma20", "price_vs_sma50", "sma_10_20_cross", "ema_cross",
+    # oscillators (bounded)
+    "rsi", "rsi_oversold", "rsi_overbought", "stoch_k", "stoch_d",
+    # normalized macd/atr
+    "macd_cross", "macd_diff_pct", "atr_pct",
+    # bollinger (indicators; bb_width already normalized by mavg)
+    "bb_high", "bb_low", "bb_width", "bb_pct",
+    # volume & volatility ratios
+    "volume_ratio", "volume_trend", "volatility_10d", "volatility_20d", "volatility_ratio",
+    # relative strength
+    "vs_market", "vs_market_5d", "vs_sector",
+    # market-wide (levels only where bounded/meaningful)
+    "sp500_return", "sp500_return_5d", "vix_close", "vix_return",
+    "treasury_10y_close", "treasury_10y_return", "treasury_3m_close", "treasury_5y_close",
+    "usd_return", "usd_return_5d", "yield_curve_spread", "yield_curve_inverted",
+    # sector ETF
+    "sector_return", "sector_return_5d", "sector_momentum",
+    # fear & greed
+    "fear_greed", "fear_greed_ma5", "fear_greed_change", "extreme_fear", "extreme_greed",
+    # earnings proximity
+    "days_to_earnings", "days_since_earnings", "earnings_near", "earnings_week", "post_earnings",
+    # insider (sign only — share counts are ticker-scale)
+    "insider_signal",
+    # macro rates & changes (raw cpi level is a date fingerprint)
+    "cpi_yoy_change", "cpi_mom_change", "unemployment", "unemployment_change",
+    "fed_funds", "fed_funds_change",
+    # sentiment
+    "sentiment", "sentiment_ma5", "sentiment_change",
+    # calendar & regime
+    "day_of_week", "month", "regime", "regime_score", "sp500_above_200sma", "vix_high", "vix_extreme",
+]
+
+
+def _use_pooled() -> bool:
+    """Pooled model flag from config.json settings; absent = per-ticker."""
+    try:
+        return bool(load_config()["settings"].get("use_pooled_model", False))
+    except Exception:
+        return False
+
+
+def _fill_sparse_external(combined: pd.DataFrame) -> pd.DataFrame:
+    for col, default in _SPARSE_NEUTRAL.items():
+        if col in combined.columns:
+            combined[col] = combined[col].fillna(default)
+    return combined
+
+
 def _merge_external(df, fetcher, **kwargs):
     """Join external data into df, handling dupes and gaps."""
     try:
@@ -290,17 +370,17 @@ def prepare_dataset(ticker: str, horizon: str = "next_day"):
     Build feature matrix X and target y.
     horizon: 'next_day' (1-day forward return) or 'weekly' (5-day forward return)
     """
-    df = fetch_stock_data(ticker, period="2y")
+    df = fetch_stock_data(ticker, period=TRAIN_PERIOD)
     if df.empty or len(df) < 60:
         return None, None, None
 
-    df = _merge_external(df, fetch_market_data, period="2y")
-    df = _merge_external(df, fetch_sector_data, ticker=ticker, period="2y")
-    df = _merge_external(df, fetch_fear_greed_history, period="2y")
-    df = _merge_external(df, fetch_earnings_history, ticker=ticker, period="2y")
-    df = _merge_external(df, fetch_insider_transactions, ticker=ticker, period="2y")
-    df = _merge_external(df, fetch_fred_data, period="2y")
-    df = _merge_external(df, fetch_fundamentals, ticker=ticker, period="2y")
+    df = _merge_external(df, fetch_market_data, period=TRAIN_PERIOD)
+    df = _merge_external(df, fetch_sector_data, ticker=ticker, period=TRAIN_PERIOD)
+    df = _merge_external(df, fetch_fear_greed_history, period=TRAIN_PERIOD)
+    df = _merge_external(df, fetch_earnings_history, ticker=ticker, period=TRAIN_PERIOD)
+    df = _merge_external(df, fetch_insider_transactions, ticker=ticker, period=TRAIN_PERIOD)
+    df = _merge_external(df, fetch_fred_data, period=TRAIN_PERIOD)
+    df = _merge_external(df, fetch_fundamentals, ticker=ticker, period=TRAIN_PERIOD)
 
     sentiment_df = get_sentiment_history_df(ticker)
     features = build_features(df, sentiment_df)
@@ -322,21 +402,23 @@ def prepare_dataset(ticker: str, horizon: str = "next_day"):
     # Drop columns that are entirely NaN (e.g. missing fundamentals for some tickers)
     # before row-wise dropna, otherwise one bad column wipes all rows
     combined = combined.dropna(axis=1, how="all")
+    combined = _fill_sparse_external(combined)
     combined = combined.dropna()
 
-    # Filter out "flat" days where the move is within noise range
-    # These are coin-flip labels that degrade training signal
-    meaningful = combined[combined["pct_target"].abs() >= noise_threshold]
-    if len(meaningful) < 30:
-        meaningful = combined  # fall back to full set if too few remain
+    # Flag "flat" days where the move is within noise range. These are
+    # coin-flip labels that degrade training signal — excluded from model
+    # fitting but kept for evaluation, since live predictions fire every day
+    combined["meaningful"] = (combined["pct_target"].abs() >= noise_threshold).astype(int)
+    if combined["meaningful"].sum() < 30:
+        combined["meaningful"] = 1  # too few clean samples — train on everything
 
-    X = meaningful.drop(columns=["target", "pct_target"])
-    y = meaningful["target"]
+    X = combined.drop(columns=["target", "pct_target", "meaningful"])
+    y = combined["target"]
 
-    return X, y, meaningful
+    return X, y, combined
 
 
-MAX_FEATURES = 30
+MAX_FEATURES = 15
 
 
 def select_features(X: pd.DataFrame, y: pd.Series, max_features: int = MAX_FEATURES) -> tuple:
@@ -387,6 +469,25 @@ def select_features(X: pd.DataFrame, y: pd.Series, max_features: int = MAX_FEATU
     }
 
 
+def _compute_sample_weights(y: pd.Series, pct_target: pd.Series) -> np.ndarray:
+    """Magnitude * class-balance weights, normalized to mean 1.
+    Uses only the rows passed in — callers must pass training rows so no
+    test-fold statistics leak into the weights."""
+    w = pct_target.abs()
+    w = w.clip(upper=w.quantile(0.95))
+    mean_mag = w.mean()
+    w = (w / mean_mag).values if mean_mag > 0 else np.ones(len(w))
+
+    n_pos = int(y.sum())
+    n_neg = len(y) - n_pos
+    class_balance = np.where(y.values == 1,
+                             len(y) / (2 * max(n_pos, 1)),
+                             len(y) / (2 * max(n_neg, 1)))
+    w = w * class_balance
+    mean_combined = w.mean()
+    return w / mean_combined if mean_combined > 0 else w
+
+
 # ── Model training ───────────────────────────────────────────────────────────
 
 def train_model(ticker: str, horizon: str = "next_day") -> dict:
@@ -396,72 +497,98 @@ def train_model(ticker: str, horizon: str = "next_day") -> dict:
     if X_raw is None or len(X_raw) == 0:
         return {"error": f"Not enough data for {ticker}"}
 
-    # Magnitude + class-balance weighted training
-    mag_weights = combined.loc[X_raw.index, "pct_target"].abs()
-    mag_weights = mag_weights.clip(upper=mag_weights.quantile(0.95))
-    mean_mag = mag_weights.mean()
-    mag_weights = (mag_weights / mean_mag).values if mean_mag > 0 else np.ones(len(mag_weights))
+    # Noise-day mask: flat days are excluded from model fitting but kept in
+    # CV test folds, so reported accuracy reflects live conditions where
+    # predictions fire every day regardless of move size
+    meaningful = combined["meaningful"].values.astype(bool)
 
-    # Class balance: compensate for bull-market bias in training data
-    n_pos = int(y.sum())
-    n_neg = len(y) - n_pos
-    class_balance = np.where(y.values == 1,
-                             len(y) / (2 * max(n_pos, 1)),
-                             len(y) / (2 * max(n_neg, 1)))
-    mag_weights = mag_weights * class_balance
-    mean_combined = mag_weights.mean()
-    mag_weights = mag_weights / mean_combined if mean_combined > 0 else mag_weights
+    # Embargo between train/test folds: targets look `gap` days ahead, so
+    # without it the last training targets overlap the first test features
+    gap = 5 if horizon == "weekly" else 1
+    tscv = TimeSeriesSplit(n_splits=5, gap=gap)
 
-    # Feature selection on full training set for the final model
-    X, selected_features, selection_info = select_features(X_raw, y)
+    # Precompute CV folds once — selection, weights and scaling depend only
+    # on the split, not the model, and must use training-fold rows only
+    try:
+        folds = []
+        for train_idx, test_idx in tscv.split(X_raw):
+            tr_mask = meaningful[train_idx]
+            if tr_mask.sum() < 30:
+                tr_mask = np.ones(len(train_idx), dtype=bool)
+            tr_rows = train_idx[tr_mask]
 
-    # Final scaler and fit on full selected data
+            X_tr = X_raw.iloc[tr_rows]
+            y_tr = y.iloc[tr_rows]
+            w_tr = _compute_sample_weights(y_tr, combined["pct_target"].iloc[tr_rows])
+
+            X_tr_sel, fold_features, _ = select_features(X_tr, y_tr)
+            X_te_sel = X_raw.iloc[test_idx].reindex(columns=fold_features, fill_value=0)
+
+            fold_scaler = StandardScaler()
+            folds.append({
+                "X_train": fold_scaler.fit_transform(X_tr_sel),
+                "y_train": y_tr,
+                "weights": w_tr,
+                "X_test": fold_scaler.transform(X_te_sel),
+                "y_test": y.iloc[test_idx],
+                "features": fold_features,
+            })
+    except Exception as e:
+        return {"error": f"CV split failed for {ticker}/{horizon}: {e}"}
+
+    # Feature selection on training (meaningful) rows for the final model
+    X, selected_features, selection_info = select_features(X_raw[meaningful], y[meaningful])
+
+    # Cross-fold stability filter: MI on noisy returns happily picks spurious
+    # features, so keep only those selected in >= 4/5 folds — evidence they
+    # carry repeatable signal across time windows
+    tally = {}
+    for fold in folds:
+        for f in fold["features"]:
+            tally[f] = tally.get(f, 0) + 1
+    stable = [f for f, n in tally.items() if n >= len(folds) - 1]
+    if len(stable) >= 8:
+        full_rank = {f: i for i, f in enumerate(selected_features)}
+        stable.sort(key=lambda f: (-tally[f], full_rank.get(f, len(full_rank))))
+        selected_features = stable[:MAX_FEATURES]
+        X = X_raw.loc[meaningful, selected_features]
+        selection_info["method"] += " + cross_fold_stability"
+        selection_info["stable_features"] = len(stable)
+        selection_info["final"] = len(selected_features)
+
+    # Final scaler fit on training rows; all rows transformed for calibration
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
+    X_all_scaled = scaler.transform(X_raw[selected_features])
+
+    # Weights for the final fit — training rows only
+    train_weights = _compute_sample_weights(y[meaningful], combined.loc[meaningful, "pct_target"])
 
     models = _get_models()
     trained = {}
     cv_results = {}
-    tscv = TimeSeriesSplit(n_splits=5)
 
-    # Per-fold CV with feature selection inside each fold (no leakage)
     for name, model in models.items():
         fold_scores = []
         try:
-            for train_idx, test_idx in tscv.split(X_raw):
-                X_train_fold = X_raw.iloc[train_idx]
-                y_train_fold = y.iloc[train_idx]
-                X_test_fold = X_raw.iloc[test_idx]
-                y_test_fold = y.iloc[test_idx]
-
-                X_train_sel, fold_features, _ = select_features(X_train_fold, y_train_fold)
-                available_test = [f for f in fold_features if f in X_test_fold.columns]
-                X_test_sel = X_test_fold[available_test]
-                for f in fold_features:
-                    if f not in X_test_sel.columns:
-                        X_test_sel[f] = 0
-                X_test_sel = X_test_sel[fold_features]
-
-                fold_scaler = StandardScaler()
-                X_train_sc = fold_scaler.fit_transform(X_train_sel)
-                X_test_sc = fold_scaler.transform(X_test_sel)
-
+            for fold in folds:
                 fold_model = clone(model)
-                fold_weights = mag_weights[train_idx]
-                fold_model.fit(X_train_sc, y_train_fold, sample_weight=fold_weights)
-                fold_scores.append(fold_model.score(X_test_sc, y_test_fold))
+                fold_model.fit(fold["X_train"], fold["y_train"],
+                               sample_weight=fold["weights"])
+                fold_scores.append(fold_model.score(fold["X_test"], fold["y_test"]))
 
-            # Fit final model on full selected+scaled data
-            model.fit(X_scaled, y, sample_weight=mag_weights)
+            # Fit final model on meaningful rows only
+            model.fit(X_scaled, y[meaningful], sample_weight=train_weights)
 
-            # Calibrate probabilities via Platt scaling (TimeSeriesSplit CV)
-            # Do NOT pass sample_weight — calibration must reflect raw accuracy,
-            # not magnitude-weighted accuracy, or it produces overconfident outputs.
+            # Calibrate probabilities via Platt scaling (TimeSeriesSplit CV).
+            # Fit on ALL rows (noise days included) to match the live prediction
+            # distribution, and do NOT pass sample_weight — calibration must
+            # reflect raw accuracy or it produces overconfident outputs.
             try:
                 calibrated = CalibratedClassifierCV(
-                    clone(model), cv=TimeSeriesSplit(n_splits=3), method="sigmoid"
+                    clone(model), cv=TimeSeriesSplit(n_splits=3, gap=gap), method="sigmoid"
                 )
-                calibrated.fit(X_scaled, y)
+                calibrated.fit(X_all_scaled, y)
                 trained[name] = calibrated
             except Exception:
                 trained[name] = model
@@ -505,6 +632,225 @@ def train_model(ticker: str, horizon: str = "next_day") -> dict:
     }
 
 
+# ── Pooled cross-sectional model ─────────────────────────────────────────────
+
+def build_pooled_dataset(horizon: str = "next_day"):
+    """
+    Concatenate per-ticker datasets into one cross-sectional design matrix.
+    Only scale-free POOLED_FEATURES survive — price/share-scale columns would
+    let the trees split on ticker identity instead of shared signal.
+    Returns (X, y, combined) where combined carries target/pct_target/
+    meaningful/ticker, or (None, None, None) if fewer than 3 tickers prepare.
+    """
+    from data_fetcher import get_watchlist
+    _prewarm_shared_cache(TRAIN_PERIOD)
+
+    frames, tickers = [], []
+    for ticker in get_watchlist():
+        try:
+            _, _, combined = prepare_dataset(ticker, horizon)
+        except Exception:
+            continue
+        if combined is None or len(combined) == 0:
+            continue
+        cols = [c for c in POOLED_FEATURES if c in combined.columns]
+        part = combined[cols + ["target", "pct_target", "meaningful"]].copy()
+        part["ticker"] = ticker
+        frames.append(part)
+        tickers.append(ticker)
+
+    if len(frames) < 3:
+        return None, None, None
+
+    pooled = pd.concat(frames).sort_index(kind="stable")
+
+    feature_cols = [c for c in POOLED_FEATURES if c in pooled.columns]
+    # Column mismatches across tickers become zeros, matching the
+    # zero-padding predict() applies to missing features
+    pooled[feature_cols] = pooled[feature_cols].fillna(0)
+
+    # Fingerprint guard: a feature that is constant within a ticker but
+    # varies across tickers identifies the ticker itself (e.g. snapshot
+    # fundamentals) — pure look-ahead in pooled training
+    stds = pooled.groupby("ticker")[feature_cols].std()
+    fingerprints = [c for c in feature_cols
+                    if (stds[c].fillna(0) == 0).sum() > len(tickers) / 2]
+    if fingerprints:
+        print(f"[pooled/{horizon}] dropping ticker-fingerprint features: {fingerprints}")
+        feature_cols = [c for c in feature_cols if c not in fingerprints]
+
+    X = pooled[feature_cols]
+    y = pooled["target"]
+    return X, y, pooled
+
+
+def _pooled_time_splits(index, n_splits: int, gap: int) -> list:
+    """
+    Date-based TimeSeriesSplit for pooled data. Multiple tickers share each
+    date, so positional splits would put one ticker's future rows in the
+    training fold while another's same-date rows sit in the test fold.
+    Splits the sorted unique dates instead, then maps folds back to rows.
+    """
+    if not index.is_monotonic_increasing:
+        raise ValueError("pooled dataset index must be sorted by date")
+
+    dates = pd.DatetimeIndex(index)
+    unique_dates = dates.unique()
+    date_pos = {d: i for i, d in enumerate(unique_dates)}
+    row_date_idx = np.array([date_pos[d] for d in dates])
+
+    splits = []
+    tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap)
+    for tr_d, te_d in tscv.split(unique_dates):
+        if te_d.min() - tr_d.max() <= gap:
+            raise AssertionError("pooled CV fold violates embargo gap")
+        train_rows = np.where(np.isin(row_date_idx, tr_d))[0]
+        test_rows = np.where(np.isin(row_date_idx, te_d))[0]
+        if dates[train_rows].max() >= dates[test_rows].min():
+            raise AssertionError("pooled CV fold is not time-ordered")
+        splits.append((train_rows, test_rows))
+    return splits
+
+
+def train_pooled_model(horizon: str = "next_day") -> dict:
+    """Train one pooled ensemble for a horizon on all watchlist tickers.
+    Mirrors train_model() but with date-based CV splits (see spec)."""
+    X_raw, y, combined = build_pooled_dataset(horizon)
+
+    if X_raw is None or len(X_raw) == 0:
+        return {"error": "Not enough pooled data (need >= 3 tickers with history)"}
+
+    meaningful = combined["meaningful"].values.astype(bool)
+    gap = 5 if horizon == "weekly" else 1
+
+    try:
+        splits = _pooled_time_splits(X_raw.index, 5, gap)
+    except Exception as e:
+        return {"error": f"Pooled CV split failed for {horizon}: {e}"}
+
+    folds = []
+    for train_idx, test_idx in splits:
+        tr_mask = meaningful[train_idx]
+        if tr_mask.sum() < 30:
+            tr_mask = np.ones(len(train_idx), dtype=bool)
+        tr_rows = train_idx[tr_mask]
+
+        X_tr = X_raw.iloc[tr_rows]
+        y_tr = y.iloc[tr_rows]
+        w_tr = _compute_sample_weights(y_tr, combined["pct_target"].iloc[tr_rows])
+
+        X_tr_sel, fold_features, _ = select_features(X_tr, y_tr)
+        X_te_sel = X_raw.iloc[test_idx].reindex(columns=fold_features, fill_value=0)
+
+        fold_scaler = StandardScaler()
+        folds.append({
+            "X_train": fold_scaler.fit_transform(X_tr_sel),
+            "y_train": y_tr,
+            "weights": w_tr,
+            "X_test": fold_scaler.transform(X_te_sel),
+            "y_test": y.iloc[test_idx],
+            "features": fold_features,
+        })
+
+    # Feature selection + cross-fold stability filter, as in train_model()
+    X, selected_features, selection_info = select_features(X_raw[meaningful], y[meaningful])
+    tally = {}
+    for fold in folds:
+        for f in fold["features"]:
+            tally[f] = tally.get(f, 0) + 1
+    stable = [f for f, n in tally.items() if n >= len(folds) - 1]
+    if len(stable) >= 8:
+        full_rank = {f: i for i, f in enumerate(selected_features)}
+        stable.sort(key=lambda f: (-tally[f], full_rank.get(f, len(full_rank))))
+        selected_features = stable[:MAX_FEATURES]
+        X = X_raw.loc[meaningful, selected_features]
+        selection_info["method"] += " + cross_fold_stability"
+        selection_info["stable_features"] = len(stable)
+        selection_info["final"] = len(selected_features)
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    X_all_scaled = scaler.transform(X_raw[selected_features])
+    train_weights = _compute_sample_weights(y[meaningful], combined.loc[meaningful, "pct_target"])
+
+    models = _get_models()
+    trained = {}
+    cv_results = {}
+
+    for name, model in models.items():
+        fold_scores = []
+        try:
+            for fold in folds:
+                fold_model = clone(model)
+                fold_model.fit(fold["X_train"], fold["y_train"],
+                               sample_weight=fold["weights"])
+                fold_scores.append(fold_model.score(fold["X_test"], fold["y_test"]))
+
+            model.fit(X_scaled, y[meaningful], sample_weight=train_weights)
+
+            # Same calibration contract as train_model() — all rows, no
+            # sample_weight — but date-based splits so no ticker straddles
+            # a fold boundary
+            try:
+                calibrated = CalibratedClassifierCV(
+                    clone(model), cv=_pooled_time_splits(X_raw.index, 3, gap),
+                    method="sigmoid",
+                )
+                calibrated.fit(X_all_scaled, y)
+                trained[name] = calibrated
+            except Exception:
+                trained[name] = model
+            cv_results[name] = {
+                "accuracy": round(np.mean(fold_scores) * 100, 1),
+                "std": round(np.std(fold_scores) * 100, 1),
+            }
+        except Exception as e:
+            cv_results[name] = {"accuracy": 0, "std": 0, "error": str(e)}
+            print(f"[WARN] {name} failed for POOLED/{horizon}: {e}")
+
+    if not trained:
+        errors = {k: v.get("error", "unknown") for k, v in cv_results.items() if "error" in v}
+        return {"error": f"All pooled models failed to train: {errors}"}
+
+    tickers = sorted(combined["ticker"].unique().tolist())
+    model_path = MODELS_DIR / f"POOLED_{horizon}.pkl"
+    with open(model_path, "wb") as f:
+        pickle.dump({
+            "models": trained,
+            "scaler": scaler,
+            "features": list(X.columns),
+            "cv_results": cv_results,
+            "tickers": tickers,
+            "trained_at": datetime.now().isoformat(),
+        }, f)
+
+    valid_accs = [v["accuracy"] for v in cv_results.values() if v["accuracy"] > 0]
+    ensemble_accuracy = round(sum(valid_accs) / len(valid_accs), 1) if valid_accs else 0
+
+    db.save_model_meta(POOLED_TICKER, horizon, len(X), ensemble_accuracy, list(X.columns))
+
+    return {
+        "ticker": POOLED_TICKER,
+        "tickers": tickers,
+        "horizon": horizon,
+        "ensemble_accuracy": ensemble_accuracy,
+        "model_results": cv_results,
+        "sample_size": len(X),
+        "num_models": len(trained),
+        "features": list(X.columns),
+        "feature_selection": selection_info,
+    }
+
+
+def load_pooled_model(horizon: str = "next_day"):
+    """Load the pooled ensemble bundle from disk, or None if not trained."""
+    model_path = MODELS_DIR / f"POOLED_{horizon}.pkl"
+    if not model_path.exists():
+        return None
+    with open(model_path, "rb") as f:
+        return pickle.load(f)
+
+
 def load_model(ticker: str, horizon: str = "next_day"):
     """Load a trained ensemble from disk."""
     model_path = MODELS_DIR / f"{ticker}_{horizon}.pkl"
@@ -526,7 +872,9 @@ def get_feature_importance(ticker: str, horizon: str = "next_day", top_n: int = 
     Extract and aggregate feature importance across all ensemble models.
     Returns ranked features with importance scores.
     """
-    bundle = load_model(ticker, horizon)
+    bundle = load_pooled_model(horizon) if _use_pooled() else None
+    if bundle is None:
+        bundle = load_model(ticker, horizon)
     if bundle is None:
         return {"error": "No trained model found. Run a prediction first."}
 
@@ -627,14 +975,20 @@ def predict(ticker: str, horizon: str = "next_day") -> dict:
     Each model votes, and the final prediction is the weighted consensus.
     Auto-trains if no model exists.
     """
-    bundle = load_model(ticker, horizon)
+    bundle, model_source = None, "per_ticker"
+    if _use_pooled():
+        bundle = load_pooled_model(horizon)
+        if bundle is not None:
+            model_source = "pooled"
 
-    # Train if needed
     if bundle is None:
-        result = train_model(ticker, horizon)
-        if "error" in result:
-            return result
         bundle = load_model(ticker, horizon)
+        # Train if needed
+        if bundle is None:
+            result = train_model(ticker, horizon)
+            if "error" in result:
+                return result
+            bundle = load_model(ticker, horizon)
 
     models = bundle["models"]
     scaler = bundle["scaler"]
@@ -725,7 +1079,8 @@ def predict(ticker: str, horizon: str = "next_day") -> dict:
     consensus = f"{max(up_votes, down_votes)}/{len(votes)} agree"
 
     # Get model accuracy info
-    meta = db.get_latest_model_meta(ticker, horizon)
+    meta = db.get_latest_model_meta(
+        POOLED_TICKER if model_source == "pooled" else ticker, horizon)
     model_accuracy = meta["accuracy"] if meta else None
 
     # Get historical prediction accuracy from our tracking
@@ -742,6 +1097,7 @@ def predict(ticker: str, horizon: str = "next_day") -> dict:
     return {
         "ticker": ticker,
         "horizon": horizon,
+        "model_source": model_source,
         "direction": direction,
         "confidence": round(confidence * 100, 1),
         "consensus": consensus,
@@ -928,12 +1284,19 @@ def resolve_predictions():
 
     # Retrain models if we resolved enough predictions
     if resolved_count >= 5:
-        from data_fetcher import get_watchlist
-        for ticker in get_watchlist():
+        if _use_pooled():
             for h in ["next_day", "weekly"]:
                 try:
-                    train_model(ticker, h)
+                    train_pooled_model(h)
                 except Exception:
                     pass
+        else:
+            from data_fetcher import get_watchlist
+            for ticker in get_watchlist():
+                for h in ["next_day", "weekly"]:
+                    try:
+                        train_model(ticker, h)
+                    except Exception:
+                        pass
 
     return resolved_count

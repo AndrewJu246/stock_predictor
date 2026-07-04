@@ -13,7 +13,9 @@ from data_fetcher import (fetch_stock_data, fetch_market_data, fetch_sector_data
                           fetch_fear_greed_history, fetch_earnings_history,
                           fetch_insider_transactions, fetch_fred_data,
                           fetch_fundamentals)
-from predictor import build_features, _merge_external, _prewarm_shared_cache, _get_models
+from predictor import (build_features, _merge_external, _prewarm_shared_cache,
+                       _get_models, _compute_sample_weights, select_features,
+                       _fill_sparse_external, TRAIN_PERIOD)
 from sentiment import get_sentiment_history_df
 
 
@@ -31,18 +33,18 @@ def run_backtest(ticker: str, horizon: str = "next_day",
         train_window: Days of data to train on before each prediction
         test_step: How many days to step forward (1 for daily)
     """
-    # Fetch extended history for backtesting
-    df = fetch_stock_data(ticker, period="2y")
+    # Fetch extended history for backtesting (same window as training)
+    df = fetch_stock_data(ticker, period=TRAIN_PERIOD)
     if df.empty or len(df) < train_window + 30:
         return {"error": f"Not enough historical data for {ticker} (need {train_window + 30}+ days, got {len(df)})"}
 
-    df = _merge_external(df, fetch_market_data, period="2y")
-    df = _merge_external(df, fetch_sector_data, ticker=ticker, period="2y")
-    df = _merge_external(df, fetch_fear_greed_history, period="2y")
-    df = _merge_external(df, fetch_earnings_history, ticker=ticker, period="2y")
-    df = _merge_external(df, fetch_insider_transactions, ticker=ticker, period="2y")
-    df = _merge_external(df, fetch_fred_data, period="2y")
-    df = _merge_external(df, fetch_fundamentals, ticker=ticker, period="2y")
+    df = _merge_external(df, fetch_market_data, period=TRAIN_PERIOD)
+    df = _merge_external(df, fetch_sector_data, ticker=ticker, period=TRAIN_PERIOD)
+    df = _merge_external(df, fetch_fear_greed_history, period=TRAIN_PERIOD)
+    df = _merge_external(df, fetch_earnings_history, ticker=ticker, period=TRAIN_PERIOD)
+    df = _merge_external(df, fetch_insider_transactions, ticker=ticker, period=TRAIN_PERIOD)
+    df = _merge_external(df, fetch_fred_data, period=TRAIN_PERIOD)
+    df = _merge_external(df, fetch_fundamentals, ticker=ticker, period=TRAIN_PERIOD)
 
     # Use historical sentiment if available
     sentiment_df = get_sentiment_history_df(ticker)
@@ -64,30 +66,21 @@ def run_backtest(ticker: str, horizon: str = "next_day",
     combined["target"] = target
     combined["pct_change"] = pct_change
     combined["close"] = df["Close"]
+    combined = combined.dropna(axis=1, how="all")
+    combined = _fill_sparse_external(combined)
     combined = combined.dropna()
 
-    # Filter out flat/noise days from training data
-    combined = combined[combined["pct_change"].abs() >= noise_threshold]
-
-    # Magnitude + class-balance weighted training
-    mag_weights = combined["pct_change"].abs()
-    mag_weights = mag_weights.clip(upper=mag_weights.quantile(0.95))
-    mag_weights = (mag_weights / mag_weights.mean()).values
-
-    n_pos = int(combined["target"].sum())
-    n_neg = len(combined) - n_pos
-    class_balance = np.where(combined["target"].values == 1,
-                             len(combined) / (2 * max(n_pos, 1)),
-                             len(combined) / (2 * max(n_neg, 1)))
-    mag_weights = mag_weights * class_balance
-    mag_weights = mag_weights / mag_weights.mean()
+    # Flag flat/noise days: excluded from training but still predicted and
+    # scored, matching live conditions where predictions fire every day
+    combined["meaningful"] = (combined["pct_change"].abs() >= noise_threshold).astype(int)
 
     if len(combined) < train_window + 10:
         return {"error": "Not enough clean data after feature engineering"}
 
     # Walk-forward simulation
     results = []
-    feature_cols = [c for c in combined.columns if c not in ["target", "pct_change", "close"]]
+    feature_cols = [c for c in combined.columns
+                    if c not in ["target", "pct_change", "close", "meaningful"]]
 
     start_idx = train_window
     end_idx = len(combined) - abs(shift)
@@ -97,22 +90,31 @@ def run_backtest(ticker: str, horizon: str = "next_day",
     # Use same models as production for honest backtest results
     bt_models = _get_models()
 
+    # Embargo: row j's outcome resolves at j + |shift|, so only rows with
+    # j + |shift| <= i are actually known at prediction time i
+    embargo = abs(shift)
+
     for i in range(start_idx, end_idx, test_step):
         step_count += 1
         if progress_callback:
             progress_callback(step_count / total_steps)
 
-        train_data = combined.iloc[:i]
+        train_data = combined.iloc[:max(i - embargo + 1, 0)]
+        train_data = train_data[train_data["meaningful"] == 1]
         test_row = combined.iloc[i:i+1]
 
         if len(train_data) < 30 or test_row.empty:
             continue
 
-        X_train = train_data[feature_cols]
         y_train = train_data["target"]
-        X_test = test_row[feature_cols]
 
         try:
+            # Per-window sample weights + feature selection, computed from the
+            # training window only — mirrors the production pipeline
+            train_weights = _compute_sample_weights(y_train, train_data["pct_change"])
+            X_train, sel_features, _ = select_features(train_data[feature_cols], y_train)
+            X_test = test_row[feature_cols].reindex(columns=sel_features, fill_value=0)
+
             scaler = StandardScaler()
             X_train_scaled = scaler.fit_transform(X_train)
             X_test_scaled = scaler.transform(X_test)
@@ -126,7 +128,6 @@ def run_backtest(ticker: str, horizon: str = "next_day",
             for name, mdl in bt_models.items():
                 try:
                     mdl = clone(mdl)
-                    train_weights = mag_weights[:len(train_data)]
                     mdl.fit(X_train_scaled, y_train, sample_weight=train_weights)
                     p_class = mdl.predict(X_test_scaled)[0]
                     p_proba = mdl.predict_proba(X_test_scaled)[0]
@@ -270,7 +271,7 @@ def run_backtest(ticker: str, horizon: str = "next_day",
 def run_backtest_all(horizon: str = "next_day") -> list:
     """Run backtest for all watchlist tickers."""
     from data_fetcher import get_watchlist
-    _prewarm_shared_cache("2y")
+    _prewarm_shared_cache(TRAIN_PERIOD)
     results = []
     for ticker in get_watchlist():
         try:

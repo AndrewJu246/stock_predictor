@@ -406,8 +406,9 @@ def fetch_fear_greed_history(period: str = "6mo") -> pd.DataFrame:
 
     try:
         import fear_greed
-        # Map our period to fear_greed's format
-        last_map = {"3mo": "3m", "6mo": "6m", "1y": "1y", "2y": "2y"}
+        # Map our period to fear_greed's format. The source only goes back
+        # ~2y, so longer periods get the max — callers neutral-fill the rest
+        last_map = {"3mo": "3m", "6mo": "6m", "1y": "1y", "2y": "2y", "5y": "2y"}
         last = last_map.get(period, "6m")
 
         history = fear_greed.get_history(last=last)
@@ -526,7 +527,8 @@ FRED_BASE_URL = "https://api.stlouisfed.org/fred/series/observations"
 
 def _fetch_fred_series(series_id: str, api_key: str, period: str = "2y") -> pd.DataFrame:
     """Fetch a single FRED series as a date-indexed DataFrame."""
-    period_days = {"3mo": 120, "6mo": 200, "1y": 400, "2y": 800}
+    # 5y gets extra headroom so cpi_yoy_change (365d pct_change) has warm-up
+    period_days = {"3mo": 120, "6mo": 200, "1y": 400, "2y": 800, "5y": 2200}
     lookback = period_days.get(period, 800)
     start = (datetime.now() - timedelta(days=lookback)).strftime("%Y-%m-%d")
 

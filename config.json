@@ -12,6 +12,7 @@
     "NVDA"
   ],
   "settings": {
+    "use_pooled_model": true,
     "lookback_days": 180,
     "retrain_interval_hours": 24,
     "news_sources": [
